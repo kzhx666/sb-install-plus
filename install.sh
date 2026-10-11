@@ -815,6 +815,34 @@ EOF
 fi
 
 # ==============================================================================
+# [6.5/10] Cloudflare Argo 隧道设置 (可选)
+# ==============================================================================
+echo -e "\n${YELLOW}[6.5/10] Cloudflare Argo 隧道设置 (免开端口 / CDN 穿透)...${PLAIN}"
+echo -e "说明：如使用 Cloudflare Tunnel，可输入 Token 和已在 CF 绑定的域名；不需要请直接回车跳过。"
+ARGO_TOKEN=""
+ARGO_DOMAIN=""
+ARGO_PORT=10086
+if [[ -f "$STATE_FILE" ]]; then
+  # shellcheck disable=SC1090
+  source "$STATE_FILE" >/dev/null 2>&1 || true
+  ARGO_TOKEN="${SB_ARGO_TOKEN:-}"
+  ARGO_DOMAIN="${SB_ARGO_DOMAIN:-}"
+fi
+
+read -r -p "Cloudflare Argo Token (直接回车跳过): " INPUT_ARGO_TOKEN || true
+if [[ -n "${INPUT_ARGO_TOKEN:-}" ]]; then
+  ARGO_TOKEN="$INPUT_ARGO_TOKEN"
+  read -r -p "请输入绑定的 Argo 域名 (例如 argo.abc.com): " INPUT_ARGO_DOMAIN || true
+  ARGO_DOMAIN="$INPUT_ARGO_DOMAIN"
+  [[ -z "$ARGO_DOMAIN" ]] && ARGO_TOKEN=""
+fi
+if [[ -n "${ARGO_TOKEN:-}" && -n "${ARGO_DOMAIN:-}" ]]; then
+  ok "Argo 隧道已配置: 域名 ${ARGO_DOMAIN}"
+else
+  info "已跳过 Argo 隧道配置"
+fi
+
+# ==============================================================================
 # [7/10] 安装/更新 Sing-box 核心
 # ==============================================================================
 echo -e "\n${YELLOW}[7/10] 安装/校验 Sing-box 核心程序...${PLAIN}"
@@ -1083,6 +1111,29 @@ fi
 FINAL_OUT="direct"
 [[ "$OUT_MODE" == "both" ]] && FINAL_OUT="direct-v4"
 
+if [[ -n "${ARGO_TOKEN:-}" && -n "${ARGO_DOMAIN:-}" ]]; then
+  INBOUNDS_JSON="$(echo "$INBOUNDS_JSON" | jq --arg uuid "$UUID" --argjson port "$ARGO_PORT" '
+    . + [
+      {
+        "type": "vless",
+        "tag": "vless-argo-in",
+        "listen": "127.0.0.1",
+        "listen_port": $port,
+        "users": [{ "uuid": $uuid }],
+        "transport": {
+          "type": "ws",
+          "path": "/argo"
+        }
+      }
+    ]
+  ')"
+  RULES_JSON="$(echo "$RULES_JSON" | jq --arg final "$FINAL_OUT" '
+    . + [
+      { "inbound": ["vless-argo-in"], "outbound": $final }
+    ]
+  ')"
+fi
+
 # 整合最终配置 (带极速本地内存 DNS 缓存)
 FINAL_CONFIG="$(jq -n \
   --argjson inbounds "$INBOUNDS_JSON" \
@@ -1171,6 +1222,48 @@ if [[ -n "$HOP_RANGE" ]]; then
   /usr/local/bin/sb-hop.sh >/dev/null 2>&1 || true
 fi
 
+# 配置与启动 Cloudflare Argo 隧道 (cloudflared)
+if [[ -n "${ARGO_TOKEN:-}" && -n "${ARGO_DOMAIN:-}" ]]; then
+  info "正在配置 Cloudflare Argo 隧道 (cloudflared)..."
+  local_arch="$(_arch_norm)"
+  if ! command -v cloudflared >/dev/null 2>&1; then
+    wget -q -O /usr/local/bin/cloudflared "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${local_arch}" || true
+    chmod +x /usr/local/bin/cloudflared >/dev/null 2>&1 || true
+  fi
+  if command -v cloudflared >/dev/null 2>&1; then
+    if has_systemd; then
+      cloudflared service install "$ARGO_TOKEN" >/dev/null 2>&1 || true
+      mkdir -p /etc/systemd/system/cloudflared.service.d >/dev/null 2>&1 || true
+      cat > /etc/systemd/system/cloudflared.service.d/override.conf <<EOF
+[Service]
+Type=simple
+TimeoutStartSec=0
+ExecStart=
+ExecStart=/usr/local/bin/cloudflared --no-autoupdate tunnel run --protocol http2 --token ${ARGO_TOKEN}
+Restart=on-failure
+RestartSec=5s
+EOF
+      systemctl daemon-reload >/dev/null 2>&1 || true
+      systemctl restart cloudflared >/dev/null 2>&1 || true
+      systemctl enable cloudflared >/dev/null 2>&1 || true
+    elif has_openrc; then
+      cat > /etc/init.d/cloudflared <<EOF
+#!/sbin/openrc-run
+name="cloudflared"
+command="/usr/local/bin/cloudflared"
+command_args="tunnel run --protocol http2 --token ${ARGO_TOKEN}"
+command_background=true
+pidfile="/run/cloudflared.pid"
+depend() { need net; }
+EOF
+      chmod +x /etc/init.d/cloudflared
+      rc-update add cloudflared default >/dev/null 2>&1 || true
+      rc-service cloudflared restart >/dev/null 2>&1 || true
+    fi
+    ok "Cloudflare Argo 隧道守护进程已配置启动！"
+  fi
+fi
+
 # 保存状态文件
 cat > "$STATE_FILE" <<EOF
 SB_OUT_MODE="${OUT_MODE}"
@@ -1198,6 +1291,9 @@ SB_TUIC_P4="${P_TUIC_V4}"
 SB_TUIC_P6="${P_TUIC_V6}"
 SB_HOP_RANGE="${HOP_RANGE}"
 SB_ENABLE_WARP="${ENABLE_WARP}"
+SB_ARGO_TOKEN="${ARGO_TOKEN:-}"
+SB_ARGO_DOMAIN="${ARGO_DOMAIN:-}"
+SB_ARGO_PORT="${ARGO_PORT:-10086}"
 EOF
 chmod 600 "$STATE_FILE"
 
@@ -1289,7 +1385,7 @@ for i in "${!HOSTS[@]}"; do
     PORT="${SB_REALITY_P4}"
     [[ "$LABEL" == "IPv6" ]] && PORT="${SB_REALITY_P6}"
     LINK="vless://${SB_UUID}@${UHOST}:${PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${SB_REALITY_SNI}&fp=chrome&pbk=${SB_REALITY_PUB}&sid=${SB_SHORT_ID}&type=tcp&headerType=none#Reality${SUFFIX}"
-    echo -e "${PURPLE}[VLESS-Reality]${PLAIN}\n${GREEN}${LINK}${PLAIN}"
+    echo -e "${GREEN}${LINK}${PLAIN}"
   fi
 
   if [[ "${SB_ENABLE_HY2:-0}" == "1" ]]; then
@@ -1298,16 +1394,22 @@ for i in "${!HOSTS[@]}"; do
     HOP_PARAM=""
     [[ -n "${SB_HOP_RANGE:-}" ]] && HOP_PARAM="&mport=${SB_HOP_RANGE}"
     LINK="hysteria2://${SB_HY2_PASS}@${UHOST}:${PORT}?insecure=${SB_CERT_INSECURE}&sni=${SB_SNI_HOST}${HOP_PARAM}#Hysteria2${SUFFIX}"
-    echo -e "${PURPLE}[Hysteria 2]${PLAIN}\n${GREEN}${LINK}${PLAIN}"
+    echo -e "${GREEN}${LINK}${PLAIN}"
   fi
 
   if [[ "${SB_ENABLE_TUIC:-0}" == "1" ]]; then
     PORT="${SB_TUIC_P4}"
     [[ "$LABEL" == "IPv6" ]] && PORT="${SB_TUIC_P6}"
     LINK="tuic://${SB_TUIC_UUID}:${SB_TUIC_PASS}@${UHOST}:${PORT}?congestion_control=bbr&alpn=h3&sni=${SB_SNI_HOST}&allow_insecure=${SB_CERT_INSECURE}#TUIC${SUFFIX}"
-    echo -e "${PURPLE}[TUIC v5]${PLAIN}\n${GREEN}${LINK}${PLAIN}"
+    echo -e "${GREEN}${LINK}${PLAIN}"
   fi
 done
+
+# Argo 隧道节点放最后
+if [[ -n "${SB_ARGO_DOMAIN:-}" ]]; then
+  LINK_ARGO="vless://${SB_UUID}@${SB_ARGO_DOMAIN}:443?encryption=none&security=tls&type=ws&host=${SB_ARGO_DOMAIN}&path=%2Fargo#Argo"
+  echo -e "${GREEN}${LINK_ARGO}${PLAIN}"
+fi
 
 # 生成并打印 Mihomo Proxies YAML
 {
@@ -1373,6 +1475,25 @@ YAML
 YAML
     fi
   done
+
+  # Argo 放在最后
+  if [[ -n "${SB_ARGO_DOMAIN:-}" ]]; then
+    cat <<YAML
+  - name: "Argo"
+    type: vless
+    server: "${SB_ARGO_DOMAIN}"
+    port: 443
+    uuid: "${SB_UUID}"
+    udp: true
+    tls: true
+    servername: "${SB_ARGO_DOMAIN}"
+    network: ws
+    ws-opts:
+      path: /argo
+      headers:
+        Host: "${SB_ARGO_DOMAIN}"
+YAML
+  fi
 } > "$MIHOMO_FILE"
 
 echo -e "\n${BLUE}==============================================================${PLAIN}"
