@@ -375,7 +375,13 @@ fw_allow_ports(){
   if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi "Status: active"; then
     for p in $tcp_ports; do ufw allow "${p}/tcp" >/dev/null 2>&1 || true; done
     for p in $udp_ports; do ufw allow "${p}/udp" >/dev/null 2>&1 || true; done
-    [[ -n "$udp_range" ]] && ufw allow "${udp_range}/udp" >/dev/null 2>&1 || true
+    if [[ -n "$udp_range" ]]; then
+      IFS=',' read -ra UPARTS <<< "$udp_range"
+      for part in "${UPARTS[@]}"; do
+        part="${part//-/:}"
+        ufw allow "${part}/udp" >/dev/null 2>&1 || true
+      done
+    fi
     ufw reload >/dev/null 2>&1 || true
     ok "已配置 ufw 规则放行端口"
     return 0
@@ -384,7 +390,13 @@ fw_allow_ports(){
   if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
     for p in $tcp_ports; do firewall-cmd --permanent --add-port="${p}/tcp" >/dev/null 2>&1 || true; done
     for p in $udp_ports; do firewall-cmd --permanent --add-port="${p}/udp" >/dev/null 2>&1 || true; done
-    [[ -n "$udp_range" ]] && firewall-cmd --permanent --add-port="${udp_range}/udp" >/dev/null 2>&1 || true
+    if [[ -n "$udp_range" ]]; then
+      IFS=',' read -ra UPARTS <<< "$udp_range"
+      for part in "${UPARTS[@]}"; do
+        part="${part//:/-}"
+        firewall-cmd --permanent --add-port="${part}/udp" >/dev/null 2>&1 || true
+      done
+    fi
     firewall-cmd --reload >/dev/null 2>&1 || true
     ok "已配置 firewalld 规则放行端口"
     return 0
@@ -398,8 +410,12 @@ fw_allow_ports(){
       iptables -C INPUT -p udp --dport "$p" -j ACCEPT >/dev/null 2>&1 || iptables -A INPUT -p udp --dport "$p" -j ACCEPT >/dev/null 2>&1 || true
     done
     if [[ -n "$udp_range" ]]; then
-      local rs="${udp_range%-*}" re="${udp_range#*-}"
-      iptables -C INPUT -p udp --dport "${rs}:${re}" -j ACCEPT >/dev/null 2>&1 || iptables -A INPUT -p udp --dport "${rs}:${re}" -j ACCEPT >/dev/null 2>&1 || true
+      local r_ipt="${udp_range//-/:}"
+      if [[ "$r_ipt" == *","* ]]; then
+        iptables -C INPUT -p udp -m multiport --dports "$r_ipt" -j ACCEPT >/dev/null 2>&1 || iptables -A INPUT -p udp -m multiport --dports "$r_ipt" -j ACCEPT >/dev/null 2>&1 || true
+      else
+        iptables -C INPUT -p udp --dport "$r_ipt" -j ACCEPT >/dev/null 2>&1 || iptables -A INPUT -p udp --dport "$r_ipt" -j ACCEPT >/dev/null 2>&1 || true
+      fi
     fi
 
     if command -v ip6tables >/dev/null 2>&1; then
@@ -410,8 +426,12 @@ fw_allow_ports(){
         ip6tables -C INPUT -p udp --dport "$p" -j ACCEPT >/dev/null 2>&1 || ip6tables -A INPUT -p udp --dport "$p" -j ACCEPT >/dev/null 2>&1 || true
       done
       if [[ -n "$udp_range" ]]; then
-        local rs6="${udp_range%-*}" re6="${udp_range#*-}"
-        ip6tables -C INPUT -p udp --dport "${rs6}:${re6}" -j ACCEPT >/dev/null 2>&1 || ip6tables -A INPUT -p udp --dport "${rs6}:${re6}" -j ACCEPT >/dev/null 2>&1 || true
+        local r6_ipt="${udp_range//-/:}"
+        if [[ "$r6_ipt" == *","* ]]; then
+          ip6tables -C INPUT -p udp -m multiport --dports "$r6_ipt" -j ACCEPT >/dev/null 2>&1 || ip6tables -A INPUT -p udp -m multiport --dports "$r6_ipt" -j ACCEPT >/dev/null 2>&1 || true
+        else
+          ip6tables -C INPUT -p udp --dport "$r6_ipt" -j ACCEPT >/dev/null 2>&1 || ip6tables -A INPUT -p udp --dport "$r6_ipt" -j ACCEPT >/dev/null 2>&1 || true
+        fi
       fi
     fi
     ok "已配置 iptables 放行端口"
@@ -454,6 +474,16 @@ update_core(){
 do_uninstall(){
   info "正在卸载 Sing-box 及全部关联配置..."
   service_disable
+  if command -v iptables >/dev/null 2>&1; then
+    iptables -t nat -D PREROUTING -p udp -j SB_HOP >/dev/null 2>&1 || true
+    iptables -t nat -F SB_HOP >/dev/null 2>&1 || true
+    iptables -t nat -X SB_HOP >/dev/null 2>&1 || true
+  fi
+  if command -v ip6tables >/dev/null 2>&1; then
+    ip6tables -t nat -D PREROUTING -p udp -j SB_HOP6 >/dev/null 2>&1 || true
+    ip6tables -t nat -F SB_HOP6 >/dev/null 2>&1 || true
+    ip6tables -t nat -X SB_HOP6 >/dev/null 2>&1 || true
+  fi
   rm -f /etc/systemd/system/sing-box.service >/dev/null 2>&1 || true
   rm -f /etc/systemd/system/cloudflared.service >/dev/null 2>&1 || true
   rm -f /etc/init.d/sing-box /etc/init.d/cloudflared >/dev/null 2>&1 || true
@@ -462,6 +492,286 @@ do_uninstall(){
   rm -f /etc/sysctl.d/99-singbox-speed.conf >/dev/null 2>&1 || true
   sysctl -p >/dev/null 2>&1 || true
   ok "卸载完成，所有节点服务及残留已彻底清除。"
+}
+
+# --- 端口跳跃范围校验 ---
+validate_hop_range(){
+  local raw="$1"
+  raw="${raw// /}"
+  raw="${raw//:/-}"
+  [[ -z "$raw" ]] && return 1
+
+  if ! [[ "$raw" =~ ^[0-9,-]+$ ]]; then
+    return 1
+  fi
+
+  IFS=',' read -ra PARTS <<< "$raw"
+  [[ "${#PARTS[@]}" -eq 0 ]] && return 1
+
+  for part in "${PARTS[@]}"; do
+    [[ -z "$part" ]] && return 1
+    if [[ "$part" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+      local s="${BASH_REMATCH[1]}"
+      local e="${BASH_REMATCH[2]}"
+      if [[ "$s" -lt 1 || "$s" -gt 65535 || "$e" -lt 1 || "$e" -gt 65535 || "$s" -gt "$e" ]]; then
+        return 1
+      fi
+    elif [[ "$part" =~ ^[0-9]+$ ]]; then
+      if [[ "$part" -lt 1 || "$part" -gt 65535 ]]; then
+        return 1
+      fi
+    else
+      return 1
+    fi
+  done
+  echo "$raw"
+  return 0
+}
+
+# --- 生成快捷管理命令脚本 (sb) ---
+generate_shortcut_script(){
+  cat > "$SHORTCUT_BIN" <<'EOSB'
+#!/usr/bin/env bash
+set -u
+RED="\033[31m"; GREEN="\033[32m"; YELLOW="\033[33m"; BLUE="\033[36m"; PURPLE="\033[35m"; PLAIN="\033[0m"
+STATE="/etc/sing-box/.sb_state"
+MIHOMO_FILE="/etc/sing-box/mihomo_proxies.yaml"
+
+if [[ ! -f "$STATE" ]]; then
+  echo -e "${RED}[ERR] 未检测到配置，请先运行 install.sh 安装！${PLAIN}"
+  exit 1
+fi
+
+source "$STATE"
+
+HOSTS=(); LABELS=()
+case "${SB_OUT_MODE:-ipv4}" in
+  both)
+    [[ -n "${SB_IPV4:-}" ]] && HOSTS+=("$SB_IPV4") && LABELS+=("IPv4")
+    [[ -n "${SB_IPV6:-}" ]] && HOSTS+=("$SB_IPV6") && LABELS+=("IPv6")
+    ;;
+  ipv6)
+    [[ -n "${SB_IPV6:-}" ]] && HOSTS+=("$SB_IPV6") && LABELS+=("")
+    ;;
+  *)
+    [[ -n "${SB_IPV4:-}" ]] && HOSTS+=("$SB_IPV4") && LABELS+=("")
+    ;;
+esac
+
+url_host(){ local h="$1"; [[ "$h" == *:* ]] && echo "[$h]" || echo "$h"; }
+
+echo -e "${BLUE}==============================================================${PLAIN}"
+echo -e "${BLUE}         Sing-box 极速节点输出 (VLESS-Reality / Hy2 / TUIC)   ${PLAIN}"
+echo -e "${BLUE}==============================================================${PLAIN}"
+
+for i in "${!HOSTS[@]}"; do
+  H="${HOSTS[$i]}"
+  UHOST="$(url_host "$H")"
+  LABEL="${LABELS[$i]}"
+  SUFFIX=""
+  [[ -n "$LABEL" ]] && SUFFIX="_${LABEL}"
+
+  echo -e "\n${YELLOW}>>> [节点组${SUFFIX}] 地址: ${H}${PLAIN}"
+
+  if [[ "${SB_ENABLE_REALITY:-0}" == "1" ]]; then
+    PORT="${SB_REALITY_P4}"
+    [[ "$LABEL" == "IPv6" ]] && PORT="${SB_REALITY_P6}"
+    LINK="vless://${SB_UUID}@${UHOST}:${PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${SB_REALITY_SNI}&fp=chrome&pbk=${SB_REALITY_PUB}&sid=${SB_SHORT_ID}&type=tcp&headerType=none#Reality${SUFFIX}"
+    echo -e "${GREEN}${LINK}${PLAIN}"
+  fi
+
+  if [[ "${SB_ENABLE_HY2:-0}" == "1" ]]; then
+    PORT="${SB_HY2_P4}"
+    [[ "$LABEL" == "IPv6" ]] && PORT="${SB_HY2_P6}"
+    HOP_PARAM=""
+    [[ -n "${SB_HOP_RANGE:-}" ]] && HOP_PARAM="&ports=${SB_HOP_RANGE}&mport=${SB_HOP_RANGE}"
+    LINK="hysteria2://${SB_HY2_PASS}@${UHOST}:${PORT}?insecure=${SB_CERT_INSECURE}&sni=${SB_SNI_HOST}&alpn=h3${HOP_PARAM}#Hysteria2${SUFFIX}"
+    echo -e "${GREEN}${LINK}${PLAIN}"
+  fi
+
+  if [[ "${SB_ENABLE_TUIC:-0}" == "1" ]]; then
+    PORT="${SB_TUIC_P4}"
+    [[ "$LABEL" == "IPv6" ]] && PORT="${SB_TUIC_P6}"
+    LINK="tuic://${SB_TUIC_UUID}:${SB_TUIC_PASS}@${UHOST}:${PORT}?congestion_control=bbr&alpn=h3&sni=${SB_SNI_HOST}&allow_insecure=${SB_CERT_INSECURE}&insecure=${SB_CERT_INSECURE}&version=5&udp_relay_mode=native#TUIC${SUFFIX}"
+    echo -e "${GREEN}${LINK}${PLAIN}"
+  fi
+done
+
+# Argo 隧道节点放最后
+if [[ -n "${SB_ARGO_DOMAIN:-}" ]]; then
+  LINK_ARGO="vless://${SB_UUID}@${SB_ARGO_DOMAIN}:443?encryption=none&security=tls&sni=${SB_ARGO_DOMAIN}&type=ws&host=${SB_ARGO_DOMAIN}&path=%2Fargo#Argo"
+  echo -e "${GREEN}${LINK_ARGO}${PLAIN}"
+fi
+
+# 生成并打印 Mihomo Proxies YAML
+{
+  echo "proxies:"
+  for i in "${!HOSTS[@]}"; do
+    H="${HOSTS[$i]}"
+    LABEL="${LABELS[$i]}"
+    SUFFIX=""
+    [[ -n "$LABEL" ]] && SUFFIX="_${LABEL}"
+
+    if [[ "${SB_ENABLE_REALITY:-0}" == "1" ]]; then
+      PORT="${SB_REALITY_P4}"
+      [[ "$LABEL" == "IPv6" ]] && PORT="${SB_REALITY_P6}"
+      cat <<YAML
+  - name: "Reality${SUFFIX}"
+    type: vless
+    server: "${H}"
+    port: ${PORT}
+    uuid: "${SB_UUID}"
+    network: tcp
+    udp: true
+    tls: true
+    flow: xtls-rprx-vision
+    servername: "${SB_REALITY_SNI}"
+    client-fingerprint: chrome
+    reality-opts:
+      public-key: "${SB_REALITY_PUB}"
+      short-id: "${SB_SHORT_ID}"
+YAML
+    fi
+
+    if [[ "${SB_ENABLE_HY2:-0}" == "1" ]]; then
+      PORT="${SB_HY2_P4}"
+      [[ "$LABEL" == "IPv6" ]] && PORT="${SB_HY2_P6}"
+      cat <<YAML
+  - name: "Hysteria2${SUFFIX}"
+    type: hysteria2
+    server: "${H}"
+    port: ${PORT}
+    password: "${SB_HY2_PASS}"
+    sni: "${SB_SNI_HOST}"
+    alpn: [h3]
+    skip-cert-verify: $([[ "$SB_CERT_INSECURE" == "1" ]] && echo "true" || echo "false")
+$([[ -n "${SB_HOP_RANGE:-}" ]] && echo "    ports: \"${SB_HOP_RANGE}\"")
+YAML
+    fi
+
+    if [[ "${SB_ENABLE_TUIC:-0}" == "1" ]]; then
+      PORT="${SB_TUIC_P4}"
+      [[ "$LABEL" == "IPv6" ]] && PORT="${SB_TUIC_P6}"
+      cat <<YAML
+  - name: "TUIC${SUFFIX}"
+    type: tuic
+    server: "${H}"
+    port: ${PORT}
+    uuid: "${SB_TUIC_UUID}"
+    password: "${SB_TUIC_PASS}"
+    version: 5
+    alpn: [h3]
+    sni: "${SB_SNI_HOST}"
+    skip-cert-verify: $([[ "$SB_CERT_INSECURE" == "1" ]] && echo "true" || echo "false")
+    congestion-controller: bbr
+    reduce-rtt: true
+YAML
+    fi
+  done
+
+  # Argo 放在最后
+  if [[ -n "${SB_ARGO_DOMAIN:-}" ]]; then
+    cat <<YAML
+  - name: "Argo"
+    type: vless
+    server: "${SB_ARGO_DOMAIN}"
+    port: 443
+    uuid: "${SB_UUID}"
+    udp: true
+    tls: true
+    servername: "${SB_ARGO_DOMAIN}"
+    network: ws
+    ws-opts:
+      path: /argo
+      headers:
+        Host: "${SB_ARGO_DOMAIN}"
+YAML
+  fi
+} > "$MIHOMO_FILE"
+
+echo -e "\n${BLUE}==============================================================${PLAIN}"
+echo -e "${YELLOW}>>> Mihomo / Clash Meta 格式配置已保存至: ${MIHOMO_FILE}${PLAIN}"
+echo -e "${BLUE}==============================================================${PLAIN}"
+cat "$MIHOMO_FILE"
+EOSB
+  chmod +x "$SHORTCUT_BIN"
+}
+
+# --- 独立管理 Hysteria 2 端口跳跃 ---
+manage_port_hop(){
+  if [[ ! -f "$CONF_DIR/config.json" || ! -f "$STATE_FILE" ]]; then
+    warn "未检测到已安装配置，请先运行安装！"
+    exit 1
+  fi
+
+  # shellcheck disable=SC1090
+  source "$STATE_FILE"
+
+  if [[ "${SB_ENABLE_HY2:-0}" -ne 1 ]]; then
+    warn "当前配置未启用 Hysteria 2 协议，无法配置端口跳跃！"
+    exit 1
+  fi
+
+  echo -e "\n${BLUE}==============================================================${PLAIN}"
+  echo -e "${BLUE}          配置 / 修改 Hysteria 2 UDP 端口跳跃范围             ${PLAIN}"
+  echo -e "${BLUE}==============================================================${PLAIN}"
+  echo -e "Hysteria 2 主监听端口: ${GREEN}${SB_HY2_P4:-未分配}${PLAIN} $([[ "${SB_OUT_MODE:-}" == "both" ]] && echo "(IPv6: ${SB_HY2_P6:-未分配})")"
+  if [[ -n "${SB_HOP_RANGE:-}" ]]; then
+    echo -e "当前跳跃端口范围: ${GREEN}${SB_HOP_RANGE}${PLAIN}"
+  else
+    echo -e "当前跳跃端口范围: ${YELLOW}未配置 (未开启端口跳跃)${PLAIN}"
+  fi
+  echo -e "--------------------------------------------------------------"
+  echo -e "提示："
+  echo -e "  - 输入新范围，例如：${GREEN}30000-32000${PLAIN} 或 ${GREEN}1000-2000,3000,4000${PLAIN}"
+  echo -e "  - 输入 ${YELLOW}0${PLAIN} 或 ${YELLOW}disable${PLAIN} 可关闭并清除端口跳跃"
+  echo -e "  - 直接回车保留现有配置"
+  echo -e "--------------------------------------------------------------"
+  read -r -p "请输入新的端口跳跃范围: " NEW_HOP_INPUT || true
+
+  NEW_HOP_INPUT="${NEW_HOP_INPUT// /}"
+
+  if [[ -z "$NEW_HOP_INPUT" ]]; then
+    info "已保留当前配置，未做修改。"
+    exit 0
+  fi
+
+  local NEW_HOP_RANGE=""
+  if [[ "$NEW_HOP_INPUT" == "0" || "$NEW_HOP_INPUT" =~ ^[Dd]isable$ ]]; then
+    NEW_HOP_RANGE=""
+    ok "已选择关闭端口跳跃"
+  else
+    NEW_HOP_RANGE="$(validate_hop_range "$NEW_HOP_INPUT" || true)"
+    if [[ -z "$NEW_HOP_RANGE" ]]; then
+      err "输入的端口跳跃范围格式无效！示例：30000-32000 或 1000-2000,3000,4000"
+      exit 1
+    fi
+  fi
+
+  # 更新 STATE_FILE
+  if grep -q "^SB_HOP_RANGE=" "$STATE_FILE"; then
+    sed -i "s/^SB_HOP_RANGE=.*/SB_HOP_RANGE=\"$NEW_HOP_RANGE\"/g" "$STATE_FILE"
+  else
+    echo "SB_HOP_RANGE=\"$NEW_HOP_RANGE\"" >> "$STATE_FILE"
+  fi
+
+  # 放行防火墙端口
+  if [[ -n "$NEW_HOP_RANGE" ]]; then
+    fw_allow_ports "" "" "$NEW_HOP_RANGE"
+  fi
+
+  # 立即执行端口跳跃挂载或清理
+  /usr/local/bin/sb-hop.sh >/dev/null 2>&1 || true
+
+  # 重新生成 sb 查看命令脚本 (同步更新链接中的 ports/mport 及 mihomo yaml)
+  generate_shortcut_script
+
+  ok "Hysteria 2 端口跳跃范围已成功更新！"
+  [[ -n "$NEW_HOP_RANGE" ]] && ok "新跳跃范围: ${GREEN}${NEW_HOP_RANGE}${PLAIN}" || ok "端口跳跃已关闭"
+  echo -e ">>> 正在展示最新节点链接及 Mihomo 格式配置...\n"
+  if [[ -x "$SHORTCUT_BIN" ]]; then
+    "$SHORTCUT_BIN"
+  fi
 }
 
 # ==============================================================================
@@ -475,11 +785,12 @@ if [[ -z "${1:-}" ]]; then
   echo -e "  ${GREEN}1.${PLAIN} 全新安装 / 重新配置 (交互式定制三大协议与极速调优)"
   echo -e "  ${GREEN}2.${PLAIN} 查看所有节点链接与配置 (sb 快捷命令)"
   echo -e "  ${GREEN}3.${PLAIN} 智能测速并更换 Reality 伪装域名"
-  echo -e "  ${GREEN}4.${PLAIN} 一键更新 Sing-box 核心至最新稳定版"
-  echo -e "  ${GREEN}5.${PLAIN} 彻底卸载脚本及所有服务"
+  echo -e "  ${GREEN}4.${PLAIN} 配置 / 修改 Hysteria 2 端口跳跃范围"
+  echo -e "  ${GREEN}5.${PLAIN} 一键更新 Sing-box 核心至最新稳定版"
+  echo -e "  ${GREEN}6.${PLAIN} 彻底卸载脚本及所有服务"
   echo -e "  ${GREEN}0.${PLAIN} 退出"
   echo -e "${BLUE}==============================================================${PLAIN}"
-  read -r -p "请输入选择 [0-5] (默认 1): " MENU_SEL
+  read -r -p "请输入选择 [0-6] (默认 1): " MENU_SEL
   MENU_SEL="${MENU_SEL:-1}"
 
   case "$MENU_SEL" in
@@ -509,14 +820,21 @@ if [[ -z "${1:-}" ]]; then
       fi
       exit 0
       ;;
-    4) update_core; exit 0 ;;
-    5) do_uninstall; exit 0 ;;
+    4) manage_port_hop; exit 0 ;;
+    5) update_core; exit 0 ;;
+    6) do_uninstall; exit 0 ;;
     0) echo "已退出。"; exit 0 ;;
     1) echo -e "\n${GREEN}开始交互式安装流程...${PLAIN}\n" ;;
     *) err "无效选择"; exit 1 ;;
   esac
 elif [[ "${1:-}" == "--uninstall" ]]; then
   do_uninstall; exit 0
+fi
+
+# 预载历史配置状态 (若存在) 以便在后续流程中无缝复用与继承
+if [[ -f "$STATE_FILE" ]]; then
+  # shellcheck disable=SC1090
+  source "$STATE_FILE" >/dev/null 2>&1 || true
 fi
 
 # ==============================================================================
@@ -648,14 +966,38 @@ echo -e ">>> 端口规划完成:"
 HOP_RANGE=""
 if [[ "$ENABLE_HY2" -eq 1 ]]; then
   echo -e "--------------------------------------------------------------"
-  read -r -p "是否为 Hysteria 2 配置 UDP 端口跳跃? [y/N] (默认 N): " ANS_HOP || true
-  if [[ "$ANS_HOP" =~ ^[Yy]$ ]]; then
-    read -r -p "请输入端口跳跃范围 (例如 30000-32000): " HOP_INPUT || true
-    if [[ "$HOP_INPUT" =~ ^[0-9]+-[0-9]+$ ]]; then
-      HOP_RANGE="$HOP_INPUT"
-      ok "端口跳跃已设置: ${HOP_RANGE}"
+  CUR_HOP="${SB_HOP_RANGE:-}"
+  if [[ -n "$CUR_HOP" ]]; then
+    echo -e "检测到现有端口跳跃范围: ${GREEN}${CUR_HOP}${PLAIN}"
+    read -r -p "是否保留此端口跳跃范围? [Y/n/修改] (直接回车保留当前配置): " ANS_HOP || true
+    if [[ "$ANS_HOP" =~ ^[Nn]$ ]]; then
+      HOP_RANGE=""
+      info "已关闭端口跳跃"
+    elif [[ "$ANS_HOP" =~ ^[CcMm]$ ]]; then
+      read -r -p "请输入新的端口跳跃范围 (例如 30000-32000 或 1000-2000,3000,4000): " HOP_INPUT || true
+      VALID_HOP="$(validate_hop_range "$HOP_INPUT" || true)"
+      if [[ -n "$VALID_HOP" ]]; then
+        HOP_RANGE="$VALID_HOP"
+        ok "端口跳跃已更新为: ${HOP_RANGE}"
+      else
+        warn "输入格式有误，保留原端口跳跃配置: ${CUR_HOP}"
+        HOP_RANGE="$CUR_HOP"
+      fi
     else
-      warn "输入格式有误，本次跳过端口跳跃配置"
+      HOP_RANGE="$CUR_HOP"
+      ok "已保留现有端口跳跃: ${HOP_RANGE}"
+    fi
+  else
+    read -r -p "是否为 Hysteria 2 配置 UDP 端口跳跃? [y/N] (默认 N): " ANS_HOP || true
+    if [[ "$ANS_HOP" =~ ^[Yy]$ ]]; then
+      read -r -p "请输入端口跳跃范围 (例如 30000-32000 或 1000-2000,3000,4000): " HOP_INPUT || true
+      VALID_HOP="$(validate_hop_range "$HOP_INPUT" || true)"
+      if [[ -n "$VALID_HOP" ]]; then
+        HOP_RANGE="$VALID_HOP"
+        ok "端口跳跃已设置: ${HOP_RANGE}"
+      else
+        warn "输入格式有误，本次跳过端口跳跃配置"
+      fi
     fi
   fi
 fi
@@ -877,12 +1219,30 @@ if [[ -f "$STATE_FILE" ]]; then
   ARGO_DOMAIN="${SB_ARGO_DOMAIN:-}"
 fi
 
-read -r -p "Cloudflare Argo Token (直接回车跳过): " INPUT_ARGO_TOKEN || true
-if [[ -n "${INPUT_ARGO_TOKEN:-}" ]]; then
-  ARGO_TOKEN="$INPUT_ARGO_TOKEN"
-  read -r -p "请输入绑定的 Argo 域名: " INPUT_ARGO_DOMAIN || true
-  ARGO_DOMAIN="$INPUT_ARGO_DOMAIN"
-  [[ -z "$ARGO_DOMAIN" ]] && ARGO_TOKEN=""
+if [[ -n "${ARGO_TOKEN:-}" && -n "${ARGO_DOMAIN:-}" ]]; then
+  echo -e "检测到现有 Argo 隧道配置 (域名: ${GREEN}${ARGO_DOMAIN}${PLAIN})"
+  read -r -p "是否保留此 Argo 隧道? [Y/n/修改] (默认 Y): " REUSE_ARGO || true
+  if [[ "$REUSE_ARGO" =~ ^[Nn]$ ]]; then
+    ARGO_TOKEN=""
+    ARGO_DOMAIN=""
+    info "已关闭 Argo 隧道"
+  elif [[ "$REUSE_ARGO" =~ ^[CcMm]$ ]]; then
+    read -r -p "请输入新的 Cloudflare Argo Token: " INPUT_ARGO_TOKEN || true
+    read -r -p "请输入新的绑定的 Argo 域名: " INPUT_ARGO_DOMAIN || true
+    ARGO_TOKEN="$INPUT_ARGO_TOKEN"
+    ARGO_DOMAIN="$INPUT_ARGO_DOMAIN"
+    [[ -z "$ARGO_DOMAIN" ]] && ARGO_TOKEN=""
+  else
+    ok "已保留现有 Argo 隧道: ${ARGO_DOMAIN}"
+  fi
+else
+  read -r -p "Cloudflare Argo Token (直接回车跳过): " INPUT_ARGO_TOKEN || true
+  if [[ -n "${INPUT_ARGO_TOKEN:-}" ]]; then
+    ARGO_TOKEN="$INPUT_ARGO_TOKEN"
+    read -r -p "请输入绑定的 Argo 域名: " INPUT_ARGO_DOMAIN || true
+    ARGO_DOMAIN="$INPUT_ARGO_DOMAIN"
+    [[ -z "$ARGO_DOMAIN" ]] && ARGO_TOKEN=""
+  fi
 fi
 if [[ -n "${ARGO_TOKEN:-}" && -n "${ARGO_DOMAIN:-}" ]]; then
   ok "Argo 隧道已配置: 域名 ${ARGO_DOMAIN}"
@@ -1251,16 +1611,40 @@ P4="${SB_HY2_P4:-0}"
 P6="${SB_HY2_P6:-0}"
 MODE="${SB_OUT_MODE:-ipv4}"
 
-[[ -z "$HOP" || "$P4" -eq 0 ]] && exit 0
-
+# 无论开启与否，先清理旧链以保证幂等与规则刷新
 if command -v iptables >/dev/null 2>&1; then
-  R="${HOP//-/:}"
-  iptables -t nat -C PREROUTING -p udp --dport "$R" -j REDIRECT --to-ports "$P4" 2>/dev/null || \
-    iptables -t nat -A PREROUTING -p udp --dport "$R" -j REDIRECT --to-ports "$P4" 2>/dev/null || true
-  if [[ "$MODE" == "both" && "$P6" -ne 0 ]] && command -v ip6tables >/dev/null 2>&1; then
-    ip6tables -t nat -C PREROUTING -p udp --dport "$R" -j REDIRECT --to-ports "$P6" 2>/dev/null || \
-      ip6tables -t nat -A PREROUTING -p udp --dport "$R" -j REDIRECT --to-ports "$P6" 2>/dev/null || true
+  iptables -t nat -D PREROUTING -p udp -j SB_HOP >/dev/null 2>&1 || true
+  iptables -t nat -F SB_HOP >/dev/null 2>&1 || true
+fi
+if command -v ip6tables >/dev/null 2>&1; then
+  ip6tables -t nat -D PREROUTING -p udp -j SB_HOP6 >/dev/null 2>&1 || true
+  ip6tables -t nat -F SB_HOP6 >/dev/null 2>&1 || true
+fi
+
+[[ -z "$HOP" ]] && exit 0
+
+# IPv4 跳跃端口 NAT REDIRECT
+if [[ "$P4" -ne 0 ]] && command -v iptables >/dev/null 2>&1; then
+  iptables -t nat -N SB_HOP 2>/dev/null || iptables -t nat -F SB_HOP
+  R_IPT="${HOP//-/:}"
+  if [[ "$R_IPT" == *","* ]]; then
+    iptables -t nat -A SB_HOP -p udp -m multiport --dports "$R_IPT" -j REDIRECT --to-ports "$P4" 2>/dev/null || true
+  else
+    iptables -t nat -A SB_HOP -p udp --dport "$R_IPT" -j REDIRECT --to-ports "$P4" 2>/dev/null || true
   fi
+  iptables -t nat -C PREROUTING -p udp -j SB_HOP 2>/dev/null || iptables -t nat -A PREROUTING -p udp -j SB_HOP 2>/dev/null || true
+fi
+
+# IPv6 跳跃端口 NAT REDIRECT (支持 ipv6 单栈及 both 双栈)
+if [[ "$P6" -ne 0 && ( "$MODE" == "ipv6" || "$MODE" == "both" ) ]] && command -v ip6tables >/dev/null 2>&1; then
+  ip6tables -t nat -N SB_HOP6 2>/dev/null || ip6tables -t nat -F SB_HOP6
+  R6_IPT="${HOP//-/:}"
+  if [[ "$R6_IPT" == *","* ]]; then
+    ip6tables -t nat -A SB_HOP6 -p udp -m multiport --dports "$R6_IPT" -j REDIRECT --to-ports "$P6" 2>/dev/null || true
+  else
+    ip6tables -t nat -A SB_HOP6 -p udp --dport "$R6_IPT" -j REDIRECT --to-ports "$P6" 2>/dev/null || true
+  fi
+  ip6tables -t nat -C PREROUTING -p udp -j SB_HOP6 2>/dev/null || ip6tables -t nat -A PREROUTING -p udp -j SB_HOP6 2>/dev/null || true
 fi
 EOF
 chmod +x "$HOP_SCRIPT"
@@ -1398,170 +1782,7 @@ fi
 service_enable_restart
 
 # 生成 /usr/local/bin/sb 查看命令
-cat > "$SHORTCUT_BIN" <<'EOSB'
-#!/usr/bin/env bash
-set -u
-RED="\033[31m"; GREEN="\033[32m"; YELLOW="\033[33m"; BLUE="\033[36m"; PURPLE="\033[35m"; PLAIN="\033[0m"
-STATE="/etc/sing-box/.sb_state"
-MIHOMO_FILE="/etc/sing-box/mihomo_proxies.yaml"
-
-if [[ ! -f "$STATE" ]]; then
-  echo -e "${RED}[ERR] 未检测到配置，请先运行 install.sh 安装！${PLAIN}"
-  exit 1
-fi
-
-source "$STATE"
-
-HOSTS=(); LABELS=()
-case "${SB_OUT_MODE:-ipv4}" in
-  both)
-    [[ -n "${SB_IPV4:-}" ]] && HOSTS+=("$SB_IPV4") && LABELS+=("IPv4")
-    [[ -n "${SB_IPV6:-}" ]] && HOSTS+=("$SB_IPV6") && LABELS+=("IPv6")
-    ;;
-  ipv6)
-    [[ -n "${SB_IPV6:-}" ]] && HOSTS+=("$SB_IPV6") && LABELS+=("")
-    ;;
-  *)
-    [[ -n "${SB_IPV4:-}" ]] && HOSTS+=("$SB_IPV4") && LABELS+=("")
-    ;;
-esac
-
-url_host(){ local h="$1"; [[ "$h" == *:* ]] && echo "[$h]" || echo "$h"; }
-
-echo -e "${BLUE}==============================================================${PLAIN}"
-echo -e "${BLUE}         Sing-box 极速节点输出 (VLESS-Reality / Hy2 / TUIC)   ${PLAIN}"
-echo -e "${BLUE}==============================================================${PLAIN}"
-
-for i in "${!HOSTS[@]}"; do
-  H="${HOSTS[$i]}"
-  UHOST="$(url_host "$H")"
-  LABEL="${LABELS[$i]}"
-  SUFFIX=""
-  [[ -n "$LABEL" ]] && SUFFIX="_${LABEL}"
-
-  echo -e "\n${YELLOW}>>> [节点组${SUFFIX}] 地址: ${H}${PLAIN}"
-
-  if [[ "${SB_ENABLE_REALITY:-0}" == "1" ]]; then
-    PORT="${SB_REALITY_P4}"
-    [[ "$LABEL" == "IPv6" ]] && PORT="${SB_REALITY_P6}"
-    LINK="vless://${SB_UUID}@${UHOST}:${PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${SB_REALITY_SNI}&fp=chrome&pbk=${SB_REALITY_PUB}&sid=${SB_SHORT_ID}&type=tcp&headerType=none#Reality${SUFFIX}"
-    echo -e "${GREEN}${LINK}${PLAIN}"
-  fi
-
-  if [[ "${SB_ENABLE_HY2:-0}" == "1" ]]; then
-    PORT="${SB_HY2_P4}"
-    [[ "$LABEL" == "IPv6" ]] && PORT="${SB_HY2_P6}"
-    HOP_PARAM=""
-    [[ -n "${SB_HOP_RANGE:-}" ]] && HOP_PARAM="&mport=${SB_HOP_RANGE}"
-    LINK="hysteria2://${SB_HY2_PASS}@${UHOST}:${PORT}?insecure=${SB_CERT_INSECURE}&sni=${SB_SNI_HOST}${HOP_PARAM}#Hysteria2${SUFFIX}"
-    echo -e "${GREEN}${LINK}${PLAIN}"
-  fi
-
-  if [[ "${SB_ENABLE_TUIC:-0}" == "1" ]]; then
-    PORT="${SB_TUIC_P4}"
-    [[ "$LABEL" == "IPv6" ]] && PORT="${SB_TUIC_P6}"
-    LINK="tuic://${SB_TUIC_UUID}:${SB_TUIC_PASS}@${UHOST}:${PORT}?congestion_control=bbr&alpn=h3&sni=${SB_SNI_HOST}&allow_insecure=${SB_CERT_INSECURE}#TUIC${SUFFIX}"
-    echo -e "${GREEN}${LINK}${PLAIN}"
-  fi
-done
-
-# Argo 隧道节点放最后
-if [[ -n "${SB_ARGO_DOMAIN:-}" ]]; then
-  LINK_ARGO="vless://${SB_UUID}@${SB_ARGO_DOMAIN}:443?encryption=none&security=tls&type=ws&host=${SB_ARGO_DOMAIN}&path=%2Fargo#Argo"
-  echo -e "${GREEN}${LINK_ARGO}${PLAIN}"
-fi
-
-# 生成并打印 Mihomo Proxies YAML
-{
-  echo "proxies:"
-  for i in "${!HOSTS[@]}"; do
-    H="${HOSTS[$i]}"
-    LABEL="${LABELS[$i]}"
-    SUFFIX=""
-    [[ -n "$LABEL" ]] && SUFFIX="_${LABEL}"
-
-    if [[ "${SB_ENABLE_REALITY:-0}" == "1" ]]; then
-      PORT="${SB_REALITY_P4}"
-      [[ "$LABEL" == "IPv6" ]] && PORT="${SB_REALITY_P6}"
-      cat <<YAML
-  - name: "Reality${SUFFIX}"
-    type: vless
-    server: "${H}"
-    port: ${PORT}
-    uuid: "${SB_UUID}"
-    network: tcp
-    udp: true
-    tls: true
-    flow: xtls-rprx-vision
-    servername: "${SB_REALITY_SNI}"
-    client-fingerprint: chrome
-    reality-opts:
-      public-key: "${SB_REALITY_PUB}"
-      short-id: "${SB_SHORT_ID}"
-YAML
-    fi
-
-    if [[ "${SB_ENABLE_HY2:-0}" == "1" ]]; then
-      PORT="${SB_HY2_P4}"
-      [[ "$LABEL" == "IPv6" ]] && PORT="${SB_HY2_P6}"
-      cat <<YAML
-  - name: "Hysteria2${SUFFIX}"
-    type: hysteria2
-    server: "${H}"
-    port: ${PORT}
-    password: "${SB_HY2_PASS}"
-    sni: "${SB_SNI_HOST}"
-    alpn: [h3]
-    skip-cert-verify: $([[ "$SB_CERT_INSECURE" == "1" ]] && echo "true" || echo "false")
-$([[ -n "${SB_HOP_RANGE:-}" ]] && echo "    ports: \"${SB_HOP_RANGE}\"")
-YAML
-    fi
-
-    if [[ "${SB_ENABLE_TUIC:-0}" == "1" ]]; then
-      PORT="${SB_TUIC_P4}"
-      [[ "$LABEL" == "IPv6" ]] && PORT="${SB_TUIC_P6}"
-      cat <<YAML
-  - name: "TUIC${SUFFIX}"
-    type: tuic
-    server: "${H}"
-    port: ${PORT}
-    uuid: "${SB_TUIC_UUID}"
-    password: "${SB_TUIC_PASS}"
-    alpn: [h3]
-    sni: "${SB_SNI_HOST}"
-    skip-cert-verify: $([[ "$SB_CERT_INSECURE" == "1" ]] && echo "true" || echo "false")
-    congestion-controller: bbr
-    reduce-rtt: true
-YAML
-    fi
-  done
-
-  # Argo 放在最后
-  if [[ -n "${SB_ARGO_DOMAIN:-}" ]]; then
-    cat <<YAML
-  - name: "Argo"
-    type: vless
-    server: "${SB_ARGO_DOMAIN}"
-    port: 443
-    uuid: "${SB_UUID}"
-    udp: true
-    tls: true
-    servername: "${SB_ARGO_DOMAIN}"
-    network: ws
-    ws-opts:
-      path: /argo
-      headers:
-        Host: "${SB_ARGO_DOMAIN}"
-YAML
-  fi
-} > "$MIHOMO_FILE"
-
-echo -e "\n${BLUE}==============================================================${PLAIN}"
-echo -e "${YELLOW}>>> Mihomo / Clash Meta 格式配置已保存至: ${MIHOMO_FILE}${PLAIN}"
-echo -e "${BLUE}==============================================================${PLAIN}"
-cat "$MIHOMO_FILE"
-EOSB
-chmod +x "$SHORTCUT_BIN"
+generate_shortcut_script
 
 echo -e "\n${GREEN}=== 部署完成！Sing-box 极速服务已在后台稳定运行 ===${PLAIN}"
 echo -e ">>> 随时输入 ${GREEN}sb${PLAIN} 查看所有节点链接与 Mihomo 配置！\n"
