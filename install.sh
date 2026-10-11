@@ -671,62 +671,31 @@ push_to_manager() {
 
   echo -e "\n${BLUE}正在连接面板并推送节点...${PLAIN}"
 
-  SUCCESS_CNT=0
-  # 执行主节点推送 (Reality, Hy2, TUIC 一起推送)
+  SOURCES_JSON="[]"
+  MAIN_TEXT=""
   if [[ ${#MAIN_NODES_LIST[@]} -gt 0 ]]; then
     MAIN_TEXT="$(printf "%s\n" "${MAIN_NODES_LIST[@]}")"
-    echo -e ">>> [1/2] 正在推送主节点集合 (Reality / Hy2 / TUIC) -> 订阅源: [${GREEN}${TAG_MAIN}${PLAIN}]..."
-    PAYLOAD_M="$(jq -n \
-      --arg tag "$TAG_MAIN" \
-      --arg nodes "$MAIN_TEXT" \
-      --arg token "$MGR_TOKEN" \
-      '{tag: $tag, nodes: $nodes, token: $token, replace: true, sync: true}')"
-
-    RESP_M="$(curl -s -S -X POST "${MGR_URL}/api/push_nodes" \
-      -H "Content-Type: application/json" \
-      -H "Authorization: Bearer ${MGR_TOKEN}" \
-      --connect-timeout 10 \
-      --max-time 30 \
-      -d "$PAYLOAD_M" 2>&1)"
-
-    if echo "$RESP_M" | grep -q '"status"[[:space:]]*:[[:space:]]*"success"'; then
-      echo -e "${GREEN}[√] 主节点 (Reality / Hy2 / TUIC) 推送成功！共 ${#MAIN_NODES_LIST[@]} 个节点。${PLAIN}"
-      SUCCESS_CNT=$((SUCCESS_CNT + 1))
-    else
-      echo -e "${RED}[×] 主节点推送失败！${PLAIN}"
-      echo -e "${YELLOW}面板响应: ${RESP_M}${PLAIN}"
-    fi
-  else
-    echo -e "${YELLOW}[!] 未启用 Reality / Hy2 / TUIC 协议节点，跳过主节点推送。${PLAIN}"
+    SOURCES_JSON="$(jq -n --arg tag "$TAG_MAIN" --arg nodes "$MAIN_TEXT" --argjson cur "$SOURCES_JSON" '$cur + [{tag: $tag, nodes: $nodes, enabled: false}]')"
   fi
 
-  # 执行 Argo 节点单独推送
   if [[ -n "$ARGO_NODE_LINK" ]]; then
-    echo -e ">>> [2/2] 正在单独推送 Argo 隧道节点 -> 订阅源: [${GREEN}${TAG_ARGO}${PLAIN}]..."
-    PAYLOAD_A="$(jq -n \
-      --arg tag "$TAG_ARGO" \
-      --arg nodes "$ARGO_NODE_LINK" \
-      --arg token "$MGR_TOKEN" \
-      '{tag: $tag, nodes: $nodes, token: $token, replace: true, sync: true}')"
-
-    RESP_A="$(curl -s -S -X POST "${MGR_URL}/api/push_nodes" \
-      -H "Content-Type: application/json" \
-      -H "Authorization: Bearer ${MGR_TOKEN}" \
-      --connect-timeout 10 \
-      --max-time 30 \
-      -d "$PAYLOAD_A" 2>&1)"
-
-    if echo "$RESP_A" | grep -q '"status"[[:space:]]*:[[:space:]]*"success"'; then
-      echo -e "${GREEN}[√] Argo 隧道节点独立推送成功！${PLAIN}"
-      SUCCESS_CNT=$((SUCCESS_CNT + 1))
-    else
-      echo -e "${RED}[×] Argo 节点推送失败！${PLAIN}"
-      echo -e "${YELLOW}面板响应: ${RESP_A}${PLAIN}"
-    fi
+    SOURCES_JSON="$(jq -n --arg tag "$TAG_ARGO" --arg nodes "$ARGO_NODE_LINK" --argjson cur "$SOURCES_JSON" '$cur + [{tag: $tag, nodes: $nodes, enabled: true}]')"
   fi
 
-  # 保存推送配置以便下次快速推送
-  if [[ $SUCCESS_CNT -gt 0 ]]; then
+  PAYLOAD="$(jq -n --arg token "$MGR_TOKEN" --argjson sources "$SOURCES_JSON" '{token: $token, replace: true, sync: true, sources: $sources}')"
+
+  RESP="$(curl -s -S -X POST "${MGR_URL}/api/push_nodes" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer ${MGR_TOKEN}" \
+    --connect-timeout 10 \
+    --max-time 30 \
+    -d "$PAYLOAD" 2>&1)"
+
+  if echo "$RESP" | grep -q '"status"[[:space:]]*:[[:space:]]*"success"'; then
+    echo -e "${GREEN}[√] 节点已成功批量推送到管理面板并置顶！${PLAIN}"
+    [[ ${#MAIN_NODES_LIST[@]} -gt 0 ]] && echo -e "  - 主节点源 (Reality/Hy2/TUIC): [${GREEN}${TAG_MAIN}${PLAIN}] (共 ${#MAIN_NODES_LIST[@]} 个节点，默认关闭优选)"
+    [[ -n "$ARGO_NODE_LINK" ]] && echo -e "  - Argo 隧道节点源: [${GREEN}${TAG_ARGO}${PLAIN}] (独立订阅源，默认开启优选)"
+
     cat > "$MGR_CONF" <<EOF
 SAVED_MGR_URL="${MGR_URL}"
 SAVED_MGR_TOKEN="${MGR_TOKEN}"
@@ -739,6 +708,10 @@ EOF
     echo -e "管理面板地址: ${BLUE}${MGR_URL}${PLAIN}"
     echo -e "聚合订阅地址: ${BLUE}${MGR_URL}/sub?token=${MGR_TOKEN}${PLAIN}"
     echo -e "${GREEN}==============================================================${PLAIN}\n"
+  else
+    echo -e "${RED}[×] 节点推送失败！${PLAIN}"
+    echo -e "${YELLOW}面板响应: ${RESP}${PLAIN}\n"
+    return 1
   fi
 }
 
