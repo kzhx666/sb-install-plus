@@ -1195,11 +1195,20 @@ FINAL_CONFIG="$(jq -n \
     },
     "dns": {
       "servers": [
-        { "tag": "dns-remote", "address": "tls://1.1.1.1", "strategy": "prefer_ipv4" },
-        { "tag": "dns-local", "address": "local", "detour": "direct" }
-      ],
-      "rules": [
-        { "outbound": "any", "server": "dns-remote" }
+        {
+          "tag": "dns-remote",
+          "type": "tls",
+          "server": "1.1.1.1"
+        },
+        {
+          "tag": "dns-direct",
+          "type": "udp",
+          "server": "1.1.1.1"
+        },
+        {
+          "tag": "dns-local",
+          "type": "local"
+        }
       ],
       "strategy": "prefer_ipv4",
       "independent_cache": true
@@ -1208,6 +1217,7 @@ FINAL_CONFIG="$(jq -n \
     "outbounds": $outbounds,
     "route": {
       "auto_detect_interface": true,
+      "default_domain_resolver": "dns-remote",
       "rules": $rules,
       "final": $final_out
     }
@@ -1219,10 +1229,11 @@ chown root:root "$CONF_DIR/config.json" >/dev/null 2>&1 || true
 chmod 644 "$CONF_DIR/config.json" >/dev/null 2>&1 || true
 
 # 验证生成的 JSON
-if ! "$INSTALL_PATH" check -c "$CONF_DIR/config.json" >/dev/null 2>&1; then
-  warn "Sing-box 语法校验提示微调，正在执行自动格式修整..."
+if ! "$INSTALL_PATH" check -c "$CONF_DIR/config.json"; then
+  err "Sing-box 配置文件语法校验失败，请检查配置！"
+  exit 1
 fi
-ok "配置文件 /etc/sing-box/config.json 生成完毕"
+ok "配置文件 /etc/sing-box/config.json 生成完毕并通过语法校验"
 
 # ==============================================================================
 # [9/10] 端口跳跃脚本、防火墙放行与内核提速应用
