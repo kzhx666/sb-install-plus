@@ -988,9 +988,12 @@ if [[ "$ENABLE_HY2" -eq 1 ]]; then
       ok "已保留现有端口跳跃: ${HOP_RANGE}"
     fi
   else
-    read -r -p "是否为 Hysteria 2 配置 UDP 端口跳跃? [y/N] (默认 N): " ANS_HOP || true
-    if [[ "$ANS_HOP" =~ ^[Yy]$ ]]; then
-      read -r -p "请输入端口跳跃范围 (例如 30000-32000 或 1000-2000,3000,4000): " HOP_INPUT || true
+    read -r -p "是否为 Hysteria 2 配置 UDP 端口跳跃? [Y/n] (默认 Y): " ANS_HOP || true
+    if [[ "$ANS_HOP" =~ ^[Nn]$ ]]; then
+      info "已跳过端口跳跃配置"
+    else
+      read -r -p "请输入端口跳跃范围 (例如 30000-32000 或 1000-2000,3000,4000) [默认 30000-32000]: " HOP_INPUT || true
+      HOP_INPUT="${HOP_INPUT:-30000-32000}"
       VALID_HOP="$(validate_hop_range "$HOP_INPUT" || true)"
       if [[ -n "$VALID_HOP" ]]; then
         HOP_RANGE="$VALID_HOP"
@@ -1141,9 +1144,9 @@ fi
 # ==============================================================================
 echo -e "\n${YELLOW}[6/10] Cloudflare WARP 智能分流设置...${PLAIN}"
 echo -e "说明：开启后仅将 ChatGPT、Claude、Gemini、Netflix 等 AI 与流媒体域名走 WARP 出口，解锁风控，其他流量保持 VPS 原生千兆直连！"
-read -r -p "是否启用 WARP 智能分流? [Y/n] (默认 Y): " ANS_WARP || true
-ENABLE_WARP=1
-[[ "$ANS_WARP" =~ ^[Nn]$ ]] && ENABLE_WARP=0
+read -r -p "是否启用 WARP 智能分流? [y/N] (默认 N): " ANS_WARP || true
+ENABLE_WARP=0
+[[ "$ANS_WARP" =~ ^[Yy]$ ]] && ENABLE_WARP=1
 
 WARP_CFG_READY=0
 WARP_PRIV=""
@@ -1202,6 +1205,8 @@ EOF
     warn "WARP 自动注册未连通 Cloudflare API，已跳过 WARP 分流，所有流量将走 VPS 原生网络"
     ENABLE_WARP=0
   fi
+else
+  info "已跳过 WARP 智能分流配置，所有流量走 VPS 原生网络"
 fi
 
 # ==============================================================================
