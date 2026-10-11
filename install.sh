@@ -684,15 +684,49 @@ if [[ "$ENABLE_HY2" -eq 1 || "$ENABLE_TUIC" -eq 1 ]]; then
   read -r -p "请选择证书模式 [1-2] (默认 1): " C_SEL || true
   C_SEL="${C_SEL:-1}"
 
+  ACME_MODE="standalone"
+  CF_TOKEN=""
+
   if [[ "$C_SEL" == "2" ]]; then
-    read -r -p "请输入你的域名: " INPUT_DOMAIN || true
+    read -r -p "请输入你的域名 (如 dc2.041639.xyz): " INPUT_DOMAIN || true
     if [[ -n "${INPUT_DOMAIN:-}" ]]; then
       DOMAIN="$INPUT_DOMAIN"
       SNI_HOST="$DOMAIN"
       CERT_INSECURE=0
       CERT_MODE="acme"
+
+      echo -e "--------------------------------------------------------------"
+      echo -e "请选择 ACME 证书申请验证方式："
+      echo -e "  1. Cloudflare DNS-01 验证 (推荐：输入 CF Token，免开 80 端口，不怕 CDN 阻断)"
+      echo -e "  2. Standalone HTTP-01 验证 (需 VPS 80 端口可用且域名直接解析到本机 IP)"
+      read -r -p "请选择验证方式 [1-2] (默认 1): " ACME_SEL || true
+      ACME_SEL="${ACME_SEL:-1}"
+
+      if [[ "$ACME_SEL" == "1" ]]; then
+        ACME_MODE="dns"
+        # 尝试复用历史 CF Token
+        if [[ -f "$STATE_FILE" ]]; then
+          source "$STATE_FILE" >/dev/null 2>&1 || true
+          CF_TOKEN="${SB_CF_TOKEN:-}"
+        fi
+        if [[ -n "$CF_TOKEN" ]]; then
+          echo -e "检测到历史 Cloudflare Token: ${GREEN}${CF_TOKEN:0:6}******${PLAIN}"
+          read -r -p "是否直接复用此 Token? [Y/n] (默认 Y): " REUSE_CF || true
+          [[ "$REUSE_CF" =~ ^[Nn]$ ]] && CF_TOKEN=""
+        fi
+        if [[ -z "$CF_TOKEN" ]]; then
+          read -r -p "请输入 Cloudflare API Token (需具备 Zone.DNS 编辑权限): " INPUT_CF_TOKEN || true
+          CF_TOKEN="$INPUT_CF_TOKEN"
+        fi
+        if [[ -z "$CF_TOKEN" ]]; then
+          warn "未输入 Cloudflare API Token，已自动切换为 Standalone HTTP-01 验证方式"
+          ACME_MODE="standalone"
+        fi
+      else
+        ACME_MODE="standalone"
+      fi
     else
-      warn "未输入域名，自动使用自签模式"
+      warn "未输入有效域名，自动使用自签证书模式"
     fi
   fi
 
@@ -721,26 +755,40 @@ EOF
     ok "自签伪装证书生成完成"
   else
     # ACME 模式
-    info "准备通过 acme.sh 签发证书..."
+    info "准备通过 acme.sh 签发证书 (验证方式: ${ACME_MODE})..."
     if ! command -v crontab >/dev/null 2>&1; then
       if command -v apt-get >/dev/null 2>&1; then apt-get install -y cron >/dev/null 2>&1; systemctl enable --now cron >/dev/null 2>&1 || true; fi
+      if command -v yum >/dev/null 2>&1 || command -v dnf >/dev/null 2>&1; then yum install -y cronie >/dev/null 2>&1; systemctl enable --now crond >/dev/null 2>&1 || true; fi
     fi
-    # 提前放行 80 端口用于 standalone 验证
-    command -v iptables >/dev/null 2>&1 && iptables -I INPUT -p tcp --dport 80 -j ACCEPT >/dev/null 2>&1 || true
+
     curl -s https://get.acme.sh | sh -s email=admin@"${DOMAIN}" >/dev/null 2>&1 || true
     ~/.acme.sh/acme.sh --upgrade --auto-upgrade >/dev/null 2>&1 || true
     ~/.acme.sh/acme.sh --set-default-ca --server letsencrypt >/dev/null 2>&1 || true
-    ~/.acme.sh/acme.sh --issue -d "$DOMAIN" --standalone --keylength ec-256 --force >/dev/null 2>&1 || true
+
+    if [[ "${ACME_MODE:-}" == "dns" ]]; then
+      export CF_Token="${CF_TOKEN}"
+      info "正在通过 Cloudflare DNS-01 API 验证并签发证书..."
+      ~/.acme.sh/acme.sh --issue --dns dns_cf -d "$DOMAIN" --keylength ec-256 --force >/dev/null 2>&1 || true
+    else
+      info "正在通过 Standalone HTTP-01 独立验证签发证书..."
+      # 提前放行 80 端口用于 standalone 验证
+      command -v iptables >/dev/null 2>&1 && iptables -I INPUT -p tcp --dport 80 -j ACCEPT >/dev/null 2>&1 || true
+      command -v ufw >/dev/null 2>&1 && ufw allow 80/tcp >/dev/null 2>&1 || true
+      command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --add-port=80/tcp >/dev/null 2>&1 || true
+      ~/.acme.sh/acme.sh --issue -d "$DOMAIN" --standalone --keylength ec-256 --force >/dev/null 2>&1 || true
+    fi
+
     ~/.acme.sh/acme.sh --install-cert -d "$DOMAIN" --ecc \
       --fullchain-file "$CERT_PATH" --key-file "$KEY_PATH" >/dev/null 2>&1 || true
+
     if [[ ! -s "$CERT_PATH" ]]; then
-      warn "ACME 签发未成功，自动降级为自签证书确保节点可用"
+      warn "ACME 证书签发未成功（请检查域名解析或 Token 权限），自动降级为自签证书确保节点可用"
       CERT_INSECURE=1
       SNI_HOST="www.bing.com"
       openssl req -new -x509 -days 3650 -nodes -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
         -keyout "$KEY_PATH" -out "$CERT_PATH" -subj "/CN=${SNI_HOST}" >/dev/null 2>&1 || true
     else
-      ok "ACME 域名证书申请成功！"
+      ok "ACME 域名证书申请成功！(${DOMAIN})"
     fi
   fi
   chmod 644 "$CERT_PATH" "$KEY_PATH" >/dev/null 2>&1 || true
@@ -1291,6 +1339,8 @@ SB_TUIC_P4="${P_TUIC_V4}"
 SB_TUIC_P6="${P_TUIC_V6}"
 SB_HOP_RANGE="${HOP_RANGE}"
 SB_ENABLE_WARP="${ENABLE_WARP}"
+SB_ACME_MODE="${ACME_MODE:-}"
+SB_CF_TOKEN="${CF_TOKEN:-}"
 SB_ARGO_TOKEN="${ARGO_TOKEN:-}"
 SB_ARGO_DOMAIN="${ARGO_DOMAIN:-}"
 SB_ARGO_PORT="${ARGO_PORT:-10086}"
