@@ -536,12 +536,14 @@ set -u
 RED="\033[31m"; GREEN="\033[32m"; YELLOW="\033[33m"; BLUE="\033[36m"; PURPLE="\033[35m"; PLAIN="\033[0m"
 STATE="/etc/sing-box/.sb_state"
 MIHOMO_FILE="/etc/sing-box/mihomo_proxies.yaml"
+MGR_CONF="/etc/sing-box/.sb_mgr_conf"
 
 if [[ ! -f "$STATE" ]]; then
   echo -e "${RED}[ERR] 未检测到配置，请先运行 install.sh 安装！${PLAIN}"
   exit 1
 fi
 
+# shellcheck disable=SC1090
 source "$STATE"
 
 HOSTS=(); LABELS=()
@@ -560,6 +562,193 @@ esac
 
 url_host(){ local h="$1"; [[ "$h" == *:* ]] && echo "[$h]" || echo "$h"; }
 
+# 收集所有协议节点链接
+MAIN_NODES_LIST=()
+for i in "${!HOSTS[@]}"; do
+  H="${HOSTS[$i]}"
+  UHOST="$(url_host "$H")"
+  LABEL="${LABELS[$i]}"
+  SUFFIX=""
+  [[ -n "$LABEL" ]] && SUFFIX="_${LABEL}"
+
+  if [[ "${SB_ENABLE_REALITY:-0}" == "1" ]]; then
+    PORT="${SB_REALITY_P4}"
+    [[ "$LABEL" == "IPv6" ]] && PORT="${SB_REALITY_P6}"
+    LINK="vless://${SB_UUID}@${UHOST}:${PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${SB_REALITY_SNI}&fp=chrome&pbk=${SB_REALITY_PUB}&sid=${SB_SHORT_ID}&type=tcp&headerType=none#Reality${SUFFIX}"
+    MAIN_NODES_LIST+=("$LINK")
+  fi
+
+  if [[ "${SB_ENABLE_HY2:-0}" == "1" ]]; then
+    PORT="${SB_HY2_P4}"
+    [[ "$LABEL" == "IPv6" ]] && PORT="${SB_HY2_P6}"
+    HOP_PARAM=""
+    [[ -n "${SB_HOP_RANGE:-}" ]] && HOP_PARAM="&ports=${SB_HOP_RANGE}&mport=${SB_HOP_RANGE}"
+    LINK="hysteria2://${SB_HY2_PASS}@${UHOST}:${PORT}?insecure=${SB_CERT_INSECURE}&sni=${SB_SNI_HOST}&alpn=h3${HOP_PARAM}#Hysteria2${SUFFIX}"
+    MAIN_NODES_LIST+=("$LINK")
+  fi
+
+  if [[ "${SB_ENABLE_TUIC:-0}" == "1" ]]; then
+    PORT="${SB_TUIC_P4}"
+    [[ "$LABEL" == "IPv6" ]] && PORT="${SB_TUIC_P6}"
+    LINK="tuic://${SB_TUIC_UUID}:${SB_TUIC_PASS}@${UHOST}:${PORT}?congestion_control=bbr&alpn=h3&sni=${SB_SNI_HOST}&allow_insecure=${SB_CERT_INSECURE}&insecure=${SB_CERT_INSECURE}&version=5&udp_relay_mode=native#TUIC${SUFFIX}"
+    MAIN_NODES_LIST+=("$LINK")
+  fi
+done
+
+ARGO_NODE_LINK=""
+if [[ -n "${SB_ARGO_DOMAIN:-}" ]]; then
+  ARGO_NODE_LINK="vless://${SB_UUID}@${SB_ARGO_DOMAIN}:443?encryption=none&security=tls&sni=${SB_ARGO_DOMAIN}&type=ws&host=${SB_ARGO_DOMAIN}&path=%2Fargo#Argo"
+fi
+
+# 独立函数：推送到节点管理平台 (cf-node-manager-plus)
+push_to_manager() {
+  echo -e "\n${BLUE}==============================================================${PLAIN}"
+  echo -e "${BLUE}        🚀 推送节点到节点管理平台 (cf-node-manager-plus)       ${PLAIN}"
+  echo -e "${BLUE}==============================================================${PLAIN}"
+
+  if ! command -v curl >/dev/null 2>&1; then
+    echo -e "${RED}[ERR] 系统缺少 curl 工具，无法发起推送！${PLAIN}"
+    return 1
+  fi
+  if ! command -v jq >/dev/null 2>&1; then
+    echo -e "${RED}[ERR] 系统缺少 jq 工具，无法生成 JSON 格式！${PLAIN}"
+    return 1
+  fi
+
+  SAVED_URL=""
+  SAVED_TOKEN=""
+  SAVED_TAG_M=""
+  SAVED_TAG_A=""
+  if [[ -f "$MGR_CONF" ]]; then
+    # shellcheck disable=SC1090
+    source "$MGR_CONF" 2>/dev/null || true
+    SAVED_URL="${SAVED_MGR_URL:-}"
+    SAVED_TOKEN="${SAVED_MGR_TOKEN:-}"
+    SAVED_TAG_M="${SAVED_TAG_MAIN:-}"
+    SAVED_TAG_A="${SAVED_TAG_ARGO:-}"
+  fi
+
+  # 1. 输入面板地址
+  if [[ -n "$SAVED_URL" ]]; then
+    read -r -p "请输入节点管理面板地址 [默认: ${SAVED_URL}]: " P_URL
+    P_URL="${P_URL:-$SAVED_URL}"
+  else
+    while true; do
+      read -r -p "请输入节点管理面板地址 (例如 http://1.2.3.4:5000 或 https://sub.domain.com): " P_URL
+      [[ -n "$P_URL" ]] && break
+      echo -e "${RED}[!] 地址不能为空，请重新输入！${PLAIN}"
+    done
+  fi
+  [[ "$P_URL" != http* ]] && P_URL="http://${P_URL}"
+  MGR_URL="${P_URL%/}"
+
+  # 2. 输入密码或 Token
+  if [[ -n "$SAVED_TOKEN" ]]; then
+    read -r -p "请输入管理面板密码或 Token (WEB_PASSWORD) [默认: 保留上次配置]: " P_TOKEN
+    MGR_TOKEN="${P_TOKEN:-$SAVED_TOKEN}"
+  else
+    while true; do
+      read -r -p "请输入管理面板密码或 Token (WEB_PASSWORD): " P_TOKEN
+      [[ -n "$P_TOKEN" ]] && break
+      echo -e "${RED}[!] 密码或 Token 不能为空，请重新输入！${PLAIN}"
+    done
+    MGR_TOKEN="$P_TOKEN"
+  fi
+
+  # 3. 输入主节点订阅源名称 (Reality / Hy2 / TUIC 三合一)
+  DEF_TAG_M="${SAVED_TAG_M:-SingBox-VPS}"
+  read -r -p "请输入主节点订阅源名称 (Reality/Hy2/TUIC 三合一) [默认: ${DEF_TAG_M}]: " P_TAG_M
+  TAG_MAIN="${P_TAG_M:-$DEF_TAG_M}"
+
+  # 4. 如果有 Argo 节点，输入 Argo 节点订阅源名称 (单独推送)
+  TAG_ARGO=""
+  if [[ -n "$ARGO_NODE_LINK" ]]; then
+    DEF_TAG_A="${SAVED_TAG_A:-${TAG_MAIN}-Argo}"
+    echo -e "${YELLOW}>>> 检测到已启用 Cloudflare Argo 隧道节点！${PLAIN}"
+    read -r -p "请输入 Argo 节点独立订阅源名称 [默认: ${DEF_TAG_A}]: " P_TAG_A
+    TAG_ARGO="${P_TAG_A:-$DEF_TAG_A}"
+  fi
+
+  echo -e "\n${BLUE}正在连接面板并推送节点...${PLAIN}"
+
+  SUCCESS_CNT=0
+  # 执行主节点推送 (Reality, Hy2, TUIC 一起推送)
+  if [[ ${#MAIN_NODES_LIST[@]} -gt 0 ]]; then
+    MAIN_TEXT="$(printf "%s\n" "${MAIN_NODES_LIST[@]}")"
+    echo -e ">>> [1/2] 正在推送主节点集合 (Reality / Hy2 / TUIC) -> 订阅源: [${GREEN}${TAG_MAIN}${PLAIN}]..."
+    PAYLOAD_M="$(jq -n \
+      --arg tag "$TAG_MAIN" \
+      --arg nodes "$MAIN_TEXT" \
+      --arg token "$MGR_TOKEN" \
+      '{tag: $tag, nodes: $nodes, token: $token, replace: true, sync: true}')"
+
+    RESP_M="$(curl -s -S -X POST "${MGR_URL}/api/push_nodes" \
+      -H "Content-Type: application/json" \
+      -H "Authorization: Bearer ${MGR_TOKEN}" \
+      --connect-timeout 10 \
+      --max-time 30 \
+      -d "$PAYLOAD_M" 2>&1)"
+
+    if echo "$RESP_M" | grep -q '"status"[[:space:]]*:[[:space:]]*"success"'; then
+      echo -e "${GREEN}[√] 主节点 (Reality / Hy2 / TUIC) 推送成功！共 ${#MAIN_NODES_LIST[@]} 个节点。${PLAIN}"
+      SUCCESS_CNT=$((SUCCESS_CNT + 1))
+    else
+      echo -e "${RED}[×] 主节点推送失败！${PLAIN}"
+      echo -e "${YELLOW}面板响应: ${RESP_M}${PLAIN}"
+    fi
+  else
+    echo -e "${YELLOW}[!] 未启用 Reality / Hy2 / TUIC 协议节点，跳过主节点推送。${PLAIN}"
+  fi
+
+  # 执行 Argo 节点单独推送
+  if [[ -n "$ARGO_NODE_LINK" ]]; then
+    echo -e ">>> [2/2] 正在单独推送 Argo 隧道节点 -> 订阅源: [${GREEN}${TAG_ARGO}${PLAIN}]..."
+    PAYLOAD_A="$(jq -n \
+      --arg tag "$TAG_ARGO" \
+      --arg nodes "$ARGO_NODE_LINK" \
+      --arg token "$MGR_TOKEN" \
+      '{tag: $tag, nodes: $nodes, token: $token, replace: true, sync: true}')"
+
+    RESP_A="$(curl -s -S -X POST "${MGR_URL}/api/push_nodes" \
+      -H "Content-Type: application/json" \
+      -H "Authorization: Bearer ${MGR_TOKEN}" \
+      --connect-timeout 10 \
+      --max-time 30 \
+      -d "$PAYLOAD_A" 2>&1)"
+
+    if echo "$RESP_A" | grep -q '"status"[[:space:]]*:[[:space:]]*"success"'; then
+      echo -e "${GREEN}[√] Argo 隧道节点独立推送成功！${PLAIN}"
+      SUCCESS_CNT=$((SUCCESS_CNT + 1))
+    else
+      echo -e "${RED}[×] Argo 节点推送失败！${PLAIN}"
+      echo -e "${YELLOW}面板响应: ${RESP_A}${PLAIN}"
+    fi
+  fi
+
+  # 保存推送配置以便下次快速推送
+  if [[ $SUCCESS_CNT -gt 0 ]]; then
+    cat > "$MGR_CONF" <<EOF
+SAVED_MGR_URL="${MGR_URL}"
+SAVED_MGR_TOKEN="${MGR_TOKEN}"
+SAVED_TAG_MAIN="${TAG_MAIN}"
+SAVED_TAG_ARGO="${TAG_ARGO}"
+EOF
+    chmod 600 "$MGR_CONF"
+    echo -e "\n${GREEN}==============================================================${PLAIN}"
+    echo -e "${GREEN}🎉 节点已成功推送到节点管理平台！${PLAIN}"
+    echo -e "管理面板地址: ${BLUE}${MGR_URL}${PLAIN}"
+    echo -e "聚合订阅地址: ${BLUE}${MGR_URL}/sub?token=${MGR_TOKEN}${PLAIN}"
+    echo -e "${GREEN}==============================================================${PLAIN}\n"
+  fi
+}
+
+# 模式分支：如果带 push 参数，则直接进入推送流程
+if [[ "${1:-}" == "push" ]]; then
+  push_to_manager
+  exit 0
+fi
+
+# 默认模式：展示所有节点链接与 Mihomo 配置
 echo -e "${BLUE}==============================================================${PLAIN}"
 echo -e "${BLUE}         Sing-box 极速节点输出 (VLESS-Reality / Hy2 / TUIC)   ${PLAIN}"
 echo -e "${BLUE}==============================================================${PLAIN}"
@@ -693,6 +882,10 @@ echo -e "\n${BLUE}==============================================================
 echo -e "${YELLOW}>>> Mihomo / Clash Meta 格式配置已保存至: ${MIHOMO_FILE}${PLAIN}"
 echo -e "${BLUE}==============================================================${PLAIN}"
 cat "$MIHOMO_FILE"
+
+echo -e "\n${BLUE}==============================================================${PLAIN}"
+echo -e ">>> 随时输入 ${GREEN}sb${PLAIN} 查看所有节点，输入 ${GREEN}sb push${PLAIN} 推送节点至管理平台！"
+echo -e "${BLUE}==============================================================${PLAIN}\n"
 EOSB
   chmod +x "$SHORTCUT_BIN"
 }
@@ -784,13 +977,14 @@ if [[ -z "${1:-}" ]]; then
   echo -e "${BLUE}==============================================================${PLAIN}"
   echo -e "  ${GREEN}1.${PLAIN} 全新安装 / 重新配置 (交互式定制三大协议与极速调优)"
   echo -e "  ${GREEN}2.${PLAIN} 查看所有节点链接与配置 (sb 快捷命令)"
-  echo -e "  ${GREEN}3.${PLAIN} 智能测速并更换 Reality 伪装域名"
-  echo -e "  ${GREEN}4.${PLAIN} 配置 / 修改 Hysteria 2 端口跳跃范围"
-  echo -e "  ${GREEN}5.${PLAIN} 一键更新 Sing-box 核心至最新稳定版"
-  echo -e "  ${GREEN}6.${PLAIN} 彻底卸载脚本及所有服务"
+  echo -e "  ${GREEN}3.${PLAIN} 推送节点至节点管理平台 (cf-node-manager-plus)"
+  echo -e "  ${GREEN}4.${PLAIN} 智能测速并更换 Reality 伪装域名"
+  echo -e "  ${GREEN}5.${PLAIN} 配置 / 修改 Hysteria 2 端口跳跃范围"
+  echo -e "  ${GREEN}6.${PLAIN} 一键更新 Sing-box 核心至最新稳定版"
+  echo -e "  ${GREEN}7.${PLAIN} 彻底卸载脚本及所有服务"
   echo -e "  ${GREEN}0.${PLAIN} 退出"
   echo -e "${BLUE}==============================================================${PLAIN}"
-  read -r -p "请输入选择 [0-6] (默认 1): " MENU_SEL
+  read -r -p "请输入选择 [0-7] (默认 1): " MENU_SEL
   MENU_SEL="${MENU_SEL:-1}"
 
   case "$MENU_SEL" in
@@ -799,6 +993,10 @@ if [[ -z "${1:-}" ]]; then
       exit 0
       ;;
     3)
+      if [[ -x "$SHORTCUT_BIN" ]]; then "$SHORTCUT_BIN" push; else warn "未检测到配置，请先运行安装！"; fi
+      exit 0
+      ;;
+    4)
       if [[ ! -f "$CONF_DIR/config.json" ]]; then
         warn "未检测到已安装配置，请先进行全新安装！"
         exit 1
@@ -820,9 +1018,9 @@ if [[ -z "${1:-}" ]]; then
       fi
       exit 0
       ;;
-    4) manage_port_hop; exit 0 ;;
-    5) update_core; exit 0 ;;
-    6) do_uninstall; exit 0 ;;
+    5) manage_port_hop; exit 0 ;;
+    6) update_core; exit 0 ;;
+    7) do_uninstall; exit 0 ;;
     0) echo "已退出。"; exit 0 ;;
     1) echo -e "\n${GREEN}开始交互式安装流程...${PLAIN}\n" ;;
     *) err "无效选择"; exit 1 ;;
@@ -1792,3 +1990,17 @@ generate_shortcut_script
 echo -e "\n${GREEN}=== 部署完成！Sing-box 极速服务已在后台稳定运行 ===${PLAIN}"
 echo -e ">>> 随时输入 ${GREEN}sb${PLAIN} 查看所有节点链接与 Mihomo 配置！\n"
 "$SHORTCUT_BIN"
+
+# 提示是否推送到节点管理平台 (cf-node-manager-plus)
+echo -e "${BLUE}==============================================================${PLAIN}"
+echo -e "${BLUE}        🚀 自动推送到节点管理平台 (cf-node-manager-plus)       ${PLAIN}"
+echo -e "${BLUE}==============================================================${PLAIN}"
+read -r -p "是否将本次生成的节点自动推送到节点管理面板? [y/N]: " DO_PUSH
+case "$DO_PUSH" in
+  [yY]|[yY][eE][sS])
+    "$SHORTCUT_BIN" push
+    ;;
+  *)
+    echo -e "已跳过自动推送。后续可随时输入 ${GREEN}sb push${PLAIN} 推送节点至管理平台！\n"
+    ;;
+esac
