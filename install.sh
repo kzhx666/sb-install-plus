@@ -688,7 +688,7 @@ if [[ "$ENABLE_HY2" -eq 1 || "$ENABLE_TUIC" -eq 1 ]]; then
   CF_TOKEN=""
 
   if [[ "$C_SEL" == "2" ]]; then
-    read -r -p "请输入你的域名 (如 dc2.041639.xyz): " INPUT_DOMAIN || true
+    read -r -p "请输入你的域名: " INPUT_DOMAIN || true
     if [[ -n "${INPUT_DOMAIN:-}" ]]; then
       DOMAIN="$INPUT_DOMAIN"
       SNI_HOST="$DOMAIN"
@@ -880,7 +880,7 @@ fi
 read -r -p "Cloudflare Argo Token (直接回车跳过): " INPUT_ARGO_TOKEN || true
 if [[ -n "${INPUT_ARGO_TOKEN:-}" ]]; then
   ARGO_TOKEN="$INPUT_ARGO_TOKEN"
-  read -r -p "请输入绑定的 Argo 域名 (例如 argo.abc.com): " INPUT_ARGO_DOMAIN || true
+  read -r -p "请输入绑定的 Argo 域名: " INPUT_ARGO_DOMAIN || true
   ARGO_DOMAIN="$INPUT_ARGO_DOMAIN"
   [[ -z "$ARGO_DOMAIN" ]] && ARGO_TOKEN=""
 fi
@@ -1210,8 +1210,7 @@ FINAL_CONFIG="$(jq -n \
           "type": "local"
         }
       ],
-      "strategy": "prefer_ipv4",
-      "independent_cache": true
+      "strategy": "prefer_ipv4"
     },
     "inbounds": $inbounds,
     "outbounds": $outbounds,
