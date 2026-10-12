@@ -1519,30 +1519,38 @@ EOF
   else
     # ACME 模式
     info "准备通过 acme.sh 签发证书 (验证方式: ${ACME_MODE})..."
-    if ! command -v crontab >/dev/null 2>&1; then
-      if command -v apt-get >/dev/null 2>&1; then apt-get install -y cron >/dev/null 2>&1; systemctl enable --now cron >/dev/null 2>&1 || true; fi
-      if command -v yum >/dev/null 2>&1 || command -v dnf >/dev/null 2>&1; then yum install -y cronie >/dev/null 2>&1; systemctl enable --now crond >/dev/null 2>&1 || true; fi
+    if [[ ! -f ~/.acme.sh/acme.sh ]]; then
+      curl -s --connect-timeout 8 -m 30 https://get.acme.sh | sh -s email=admin@"${DOMAIN}" >/dev/null 2>&1 || true
     fi
-
-    curl -s https://get.acme.sh | sh -s email=admin@"${DOMAIN}" >/dev/null 2>&1 || true
-    ~/.acme.sh/acme.sh --upgrade --auto-upgrade >/dev/null 2>&1 || true
-    ~/.acme.sh/acme.sh --set-default-ca --server letsencrypt >/dev/null 2>&1 || true
+    if [[ -f ~/.acme.sh/acme.sh ]]; then
+      ~/.acme.sh/acme.sh --set-default-ca --server letsencrypt >/dev/null 2>&1 || true
+    fi
 
     if [[ "${ACME_MODE:-}" == "dns" ]]; then
       export CF_Token="${CF_TOKEN}"
       info "正在通过 Cloudflare DNS-01 API 验证并签发证书..."
-      ~/.acme.sh/acme.sh --issue --dns dns_cf -d "$DOMAIN" --keylength ec-256 --force >/dev/null 2>&1 || true
+      if command -v timeout >/dev/null 2>&1; then
+        timeout 60 ~/.acme.sh/acme.sh --issue --dns dns_cf --dnssleep 15 -d "$DOMAIN" --keylength ec-256 --force >/dev/null 2>&1 || true
+      else
+        ~/.acme.sh/acme.sh --issue --dns dns_cf --dnssleep 15 -d "$DOMAIN" --keylength ec-256 --force >/dev/null 2>&1 || true
+      fi
     else
       info "正在通过 Standalone HTTP-01 独立验证签发证书..."
       # 提前放行 80 端口用于 standalone 验证
       command -v iptables >/dev/null 2>&1 && iptables -I INPUT -p tcp --dport 80 -j ACCEPT >/dev/null 2>&1 || true
       command -v ufw >/dev/null 2>&1 && ufw allow 80/tcp >/dev/null 2>&1 || true
       command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --add-port=80/tcp >/dev/null 2>&1 || true
-      ~/.acme.sh/acme.sh --issue -d "$DOMAIN" --standalone --keylength ec-256 --force >/dev/null 2>&1 || true
+      if command -v timeout >/dev/null 2>&1; then
+        timeout 45 ~/.acme.sh/acme.sh --issue -d "$DOMAIN" --standalone --keylength ec-256 --force >/dev/null 2>&1 || true
+      else
+        ~/.acme.sh/acme.sh --issue -d "$DOMAIN" --standalone --keylength ec-256 --force >/dev/null 2>&1 || true
+      fi
     fi
 
-    ~/.acme.sh/acme.sh --install-cert -d "$DOMAIN" --ecc \
-      --fullchain-file "$CERT_PATH" --key-file "$KEY_PATH" >/dev/null 2>&1 || true
+    if [[ -f ~/.acme.sh/acme.sh ]]; then
+      ~/.acme.sh/acme.sh --install-cert -d "$DOMAIN" --ecc \
+        --fullchain-file "$CERT_PATH" --key-file "$KEY_PATH" >/dev/null 2>&1 || true
+    fi
 
     if [[ ! -s "$CERT_PATH" ]]; then
       warn "ACME 证书签发未成功（请检查域名解析或 Token 权限），自动降级为自签证书确保节点可用"
@@ -2111,25 +2119,29 @@ if [[ -n "${ARGO_TOKEN:-}" && -n "${ARGO_DOMAIN:-}" ]]; then
   info "正在配置 Cloudflare Argo 隧道 (cloudflared)..."
   local_arch="$(_arch_norm)"
   if ! command -v cloudflared >/dev/null 2>&1; then
-    curl -fsSL "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${local_arch}" -o /usr/local/bin/cloudflared 2>/dev/null || \
-    wget -q -O /usr/local/bin/cloudflared "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${local_arch}" || true
+    info "正在下载 cloudflared 核心守护程序..."
+    CF_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${local_arch}"
+    curl -fsSL --connect-timeout 8 -m 60 "$CF_URL" -o /usr/local/bin/cloudflared 2>/dev/null || \
+    curl -fsSL --connect-timeout 8 -m 60 "https://mirror.ghproxy.com/$CF_URL" -o /usr/local/bin/cloudflared 2>/dev/null || \
+    curl -fsSL --connect-timeout 8 -m 60 "https://ghproxy.net/$CF_URL" -o /usr/local/bin/cloudflared 2>/dev/null || \
+    wget -q -T 30 -O /usr/local/bin/cloudflared "$CF_URL" || true
     chmod +x /usr/local/bin/cloudflared >/dev/null 2>&1 || true
   fi
   if command -v cloudflared >/dev/null 2>&1; then
     if has_systemd; then
-      cloudflared service install "$ARGO_TOKEN" >/dev/null 2>&1 || true
+      timeout 15 cloudflared service install "$ARGO_TOKEN" >/dev/null 2>&1 || true
       mkdir -p /etc/systemd/system/cloudflared.service.d >/dev/null 2>&1 || true
       cat > /etc/systemd/system/cloudflared.service.d/override.conf <<EOF
 [Service]
 Type=simple
-TimeoutStartSec=0
+TimeoutStartSec=15
 ExecStart=
 ExecStart=/usr/local/bin/cloudflared --no-autoupdate tunnel run --protocol http2 --token ${ARGO_TOKEN}
 Restart=on-failure
 RestartSec=5s
 EOF
       systemctl daemon-reload >/dev/null 2>&1 || true
-      systemctl restart cloudflared >/dev/null 2>&1 || true
+      timeout 15 systemctl restart cloudflared >/dev/null 2>&1 || true
       systemctl enable cloudflared >/dev/null 2>&1 || true
     elif has_openrc; then
       cat > /etc/init.d/cloudflared <<EOF
