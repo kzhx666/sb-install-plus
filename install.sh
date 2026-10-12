@@ -1156,10 +1156,39 @@ elif [[ "${1:-}" == "--uninstall" ]]; then
   do_uninstall; exit 0
 fi
 
+# 暂存外部传入的环境变量 (自动化部署模式具有最高优先级，防止被旧的 STATE_FILE 覆盖)
+_EXT_AUTO_INSTALL="${AUTO_INSTALL:-0}"
+_EXT_ARGO_TOKEN="${SB_ARGO_TOKEN:-${ARGO_TOKEN:-}}"
+_EXT_ARGO_DOMAIN="${SB_ARGO_DOMAIN:-${ARGO_DOMAIN:-}}"
+_EXT_CF_TOKEN="${SB_CF_TOKEN:-${CF_TOKEN:-}}"
+_EXT_ACME_MODE="${SB_ACME_MODE:-${ACME_MODE:-}}"
+_EXT_REALITY_SNI="${REALITY_SNI:-}"
+_EXT_INPUT_DOMAIN="${INPUT_DOMAIN:-${DOMAIN:-}}"
+_EXT_ENABLE_REALITY="${SB_ENABLE_REALITY:-}"
+_EXT_ENABLE_HY2="${SB_ENABLE_HY2:-}"
+_EXT_ENABLE_TUIC="${SB_ENABLE_TUIC:-}"
+_EXT_HOP_RANGE="${SB_HOP_RANGE:-}"
+_EXT_OUT_MODE="${SB_OUT_MODE:-${OUT_MODE:-}}"
+
 # 预载历史配置状态 (若存在) 以便在后续流程中无缝复用与继承
 if [[ -f "$STATE_FILE" ]]; then
   # shellcheck disable=SC1090
   source "$STATE_FILE" >/dev/null 2>&1 || true
+fi
+
+# 若为自动化部署模式，强制以外部传入的参数覆盖旧配置
+if [[ "${_EXT_AUTO_INSTALL}" -eq 1 || "${1:-}" == "--auto" || "${1:-}" == "auto" ]]; then
+  [[ -n "$_EXT_ARGO_TOKEN" ]] && SB_ARGO_TOKEN="$_EXT_ARGO_TOKEN"
+  [[ -n "$_EXT_ARGO_DOMAIN" ]] && SB_ARGO_DOMAIN="$_EXT_ARGO_DOMAIN"
+  [[ -n "$_EXT_CF_TOKEN" ]] && SB_CF_TOKEN="$_EXT_CF_TOKEN"
+  [[ -n "$_EXT_ACME_MODE" ]] && SB_ACME_MODE="$_EXT_ACME_MODE"
+  [[ -n "$_EXT_REALITY_SNI" ]] && REALITY_SNI="$_EXT_REALITY_SNI"
+  [[ -n "$_EXT_INPUT_DOMAIN" ]] && INPUT_DOMAIN="$_EXT_INPUT_DOMAIN"
+  [[ -n "$_EXT_ENABLE_REALITY" ]] && SB_ENABLE_REALITY="$_EXT_ENABLE_REALITY"
+  [[ -n "$_EXT_ENABLE_HY2" ]] && SB_ENABLE_HY2="$_EXT_ENABLE_HY2"
+  [[ -n "$_EXT_ENABLE_TUIC" ]] && SB_ENABLE_TUIC="$_EXT_ENABLE_TUIC"
+  [[ -n "$_EXT_HOP_RANGE" ]] && SB_HOP_RANGE="$_EXT_HOP_RANGE"
+  [[ -n "$_EXT_OUT_MODE" ]] && SB_OUT_MODE="$_EXT_OUT_MODE"
 fi
 
 # ==============================================================================
@@ -1607,21 +1636,23 @@ fi
 # ==============================================================================
 echo -e "\n${YELLOW}[6.5/10] Cloudflare Argo 隧道设置 (免开端口 / CDN 穿透)...${PLAIN}"
 echo -e "说明：如使用 Cloudflare Tunnel，可输入 Token 和已在 CF 绑定的域名；不需要请直接回车跳过。"
-ARGO_TOKEN=""
-ARGO_DOMAIN=""
 ARGO_PORT=10086
-if [[ -f "$STATE_FILE" ]]; then
-  # shellcheck disable=SC1090
-  source "$STATE_FILE" >/dev/null 2>&1 || true
-  ARGO_TOKEN="${SB_ARGO_TOKEN:-}"
-  ARGO_DOMAIN="${SB_ARGO_DOMAIN:-}"
-fi
 
 if [[ "${AUTO_INSTALL:-0}" -eq 1 ]]; then
-  ARGO_TOKEN="${SB_ARGO_TOKEN:-${ARGO_TOKEN:-}}"
-  ARGO_DOMAIN="${SB_ARGO_DOMAIN:-${ARGO_DOMAIN:-}}"
+  # 自动部署模式：优先使用外部传入的 Argo Token 和域名
+  ARGO_TOKEN="${_EXT_ARGO_TOKEN:-${SB_ARGO_TOKEN:-}}"
+  ARGO_DOMAIN="${_EXT_ARGO_DOMAIN:-${SB_ARGO_DOMAIN:-}}"
   [[ -z "$ARGO_DOMAIN" ]] && ARGO_TOKEN=""
-elif [[ -n "${ARGO_TOKEN:-}" && -n "${ARGO_DOMAIN:-}" ]]; then
+else
+  ARGO_TOKEN=""
+  ARGO_DOMAIN=""
+  if [[ -f "$STATE_FILE" ]]; then
+    # shellcheck disable=SC1090
+    source "$STATE_FILE" >/dev/null 2>&1 || true
+    ARGO_TOKEN="${SB_ARGO_TOKEN:-}"
+    ARGO_DOMAIN="${SB_ARGO_DOMAIN:-}"
+  fi
+  if [[ -n "${ARGO_TOKEN:-}" && -n "${ARGO_DOMAIN:-}" ]]; then
   echo -e "检测到现有 Argo 隧道配置 (域名: ${GREEN}${ARGO_DOMAIN}${PLAIN})"
   read -r -p "是否保留此 Argo 隧道? [Y/n/修改] (默认 Y): " REUSE_ARGO || true
   if [[ "$REUSE_ARGO" =~ ^[Nn]$ ]]; then
@@ -1645,6 +1676,7 @@ else
     ARGO_DOMAIN="$INPUT_ARGO_DOMAIN"
     [[ -z "$ARGO_DOMAIN" ]] && ARGO_TOKEN=""
   fi
+fi
 fi
 
 if [[ -n "${ARGO_TOKEN:-}" ]]; then
@@ -2079,6 +2111,7 @@ if [[ -n "${ARGO_TOKEN:-}" && -n "${ARGO_DOMAIN:-}" ]]; then
   info "正在配置 Cloudflare Argo 隧道 (cloudflared)..."
   local_arch="$(_arch_norm)"
   if ! command -v cloudflared >/dev/null 2>&1; then
+    curl -fsSL "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${local_arch}" -o /usr/local/bin/cloudflared 2>/dev/null || \
     wget -q -O /usr/local/bin/cloudflared "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${local_arch}" || true
     chmod +x /usr/local/bin/cloudflared >/dev/null 2>&1 || true
   fi
