@@ -117,9 +117,33 @@ install_pkgs(){
   info "正在检测并安装必要依赖包..."
   case "$PKG_MGR" in
     apt)
-      apt-get update -y >/dev/null 2>&1
-      apt-get install -y bash curl wget tar jq openssl socat lsof net-tools file gzip grep \
-        iptables iproute2 nftables ca-certificates coreutils util-linux libcap2-bin procps dnsutils >/dev/null 2>&1
+      export DEBIAN_FRONTEND=noninteractive
+      export NEEDRESTART_MODE=a
+      export NEEDRESTART_SUSPEND=1
+      if [ -f /etc/needrestart/needrestart.conf ]; then
+        sed -i "s/#\$nrconf{restart} = 'i';/\$nrconf{restart} = 'a';/g" /etc/needrestart/needrestart.conf 2>/dev/null || true
+      fi
+
+      # 检查是否已包含关键依赖 (jq, curl/wget, tar, iptables)
+      if command -v jq >/dev/null 2>&1 && (command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1) && command -v iptables >/dev/null 2>&1; then
+        ok "关键依赖组件已就绪，跳过包管理器重复更新"
+        return 0
+      fi
+
+      systemctl stop unattended-upgrades apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
+      rm -f /var/lib/dpkg/lock* /var/lib/apt/lists/lock /var/cache/apt/archives/lock 2>/dev/null || true
+      dpkg --configure -a 2>/dev/null || true
+
+      APT_OPTS="-o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10 -o Acquire::Retries=1 -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold"
+      if command -v timeout >/dev/null 2>&1; then
+        timeout 35 apt-get update -y $APT_OPTS >/dev/null 2>&1 || true
+        timeout 90 apt-get install -y $APT_OPTS bash curl wget tar jq openssl socat lsof net-tools file gzip grep \
+          iptables iproute2 nftables ca-certificates coreutils util-linux libcap2-bin procps dnsutils >/dev/null 2>&1 || true
+      else
+        apt-get update -y $APT_OPTS >/dev/null 2>&1 || true
+        apt-get install -y $APT_OPTS bash curl wget tar jq openssl socat lsof net-tools file gzip grep \
+          iptables iproute2 nftables ca-certificates coreutils util-linux libcap2-bin procps dnsutils >/dev/null 2>&1 || true
+      fi
       ;;
     yum|dnf)
       $PKG_MGR update -y >/dev/null 2>&1
