@@ -494,26 +494,64 @@ update_core(){
 
 # --- 卸载逻辑 ---
 do_uninstall(){
-  info "正在卸载 Sing-box 及全部关联配置..."
+  info "正在彻底卸载 Sing-box 及全部关联配置与服务..."
   service_disable
+  
+  # 停止并卸载 Cloudflare Argo tunnel 守护进程
+  if command -v cloudflared >/dev/null 2>&1; then
+    cloudflared service uninstall >/dev/null 2>&1 || true
+  fi
+  if has_systemd; then
+    systemctl stop cloudflared >/dev/null 2>&1 || true
+    systemctl disable cloudflared >/dev/null 2>&1 || true
+  elif has_openrc; then
+    rc-service cloudflared stop >/dev/null 2>&1 || true
+    rc-update del cloudflared default >/dev/null 2>&1 || true
+  fi
+  pkill -9 -f sing-box >/dev/null 2>&1 || true
+  pkill -9 -f cloudflared >/dev/null 2>&1 || true
+
+  # 清理端口跳跃 iptables 规则
   if command -v iptables >/dev/null 2>&1; then
     iptables -t nat -D PREROUTING -p udp -j SB_HOP >/dev/null 2>&1 || true
+    iptables -t nat -D PREROUTING -j SB_HOP >/dev/null 2>&1 || true
     iptables -t nat -F SB_HOP >/dev/null 2>&1 || true
     iptables -t nat -X SB_HOP >/dev/null 2>&1 || true
   fi
   if command -v ip6tables >/dev/null 2>&1; then
     ip6tables -t nat -D PREROUTING -p udp -j SB_HOP6 >/dev/null 2>&1 || true
+    ip6tables -t nat -D PREROUTING -j SB_HOP6 >/dev/null 2>&1 || true
     ip6tables -t nat -F SB_HOP6 >/dev/null 2>&1 || true
     ip6tables -t nat -X SB_HOP6 >/dev/null 2>&1 || true
   fi
-  rm -f /etc/systemd/system/sing-box.service >/dev/null 2>&1 || true
-  rm -f /etc/systemd/system/cloudflared.service >/dev/null 2>&1 || true
+
+  # 清理系统服务与单元
+  rm -f /etc/systemd/system/sing-box.service* >/dev/null 2>&1 || true
+  rm -rf /etc/systemd/system/sing-box.service.d >/dev/null 2>&1 || true
+  rm -f /etc/systemd/system/cloudflared.service* >/dev/null 2>&1 || true
+  rm -rf /etc/systemd/system/cloudflared.service.d >/dev/null 2>&1 || true
+  rm -f /etc/systemd/system/sb-hop.service* >/dev/null 2>&1 || true
   rm -f /etc/init.d/sing-box /etc/init.d/cloudflared >/dev/null 2>&1 || true
-  rm -f "$HOP_SCRIPT" "$CHECK_SCRIPT" "$SHORTCUT_BIN" "$INSTALL_PATH" >/dev/null 2>&1 || true
-  rm -rf "$CONF_DIR" >/dev/null 2>&1 || true
+
+  if has_systemd; then
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl reset-failed >/dev/null 2>&1 || true
+  fi
+
+  # 清除所有二进制、脚本与快捷方式
+  rm -f "$HOP_SCRIPT" "$CHECK_SCRIPT" "$SHORTCUT_BIN" "$INSTALL_PATH" /usr/local/bin/cloudflared /usr/bin/cloudflared /usr/bin/sing-box >/dev/null 2>&1 || true
+  
+  # 清除配置、证书、状态、日志及临时文件
+  rm -rf "$CONF_DIR" /etc/cloudflared /var/log/sing-box* /tmp/sb* /tmp/sing-box* /tmp/cloudflared* >/dev/null 2>&1 || true
+  
+  # 清理 Crontab 任务
+  if command -v crontab >/dev/null 2>&1; then
+    crontab -l 2>/dev/null | grep -v 'sing-box' | grep -v 'sb-' | grep -v 'cloudflared' | crontab - 2>/dev/null || true
+  fi
+
   rm -f /etc/sysctl.d/99-singbox-speed.conf >/dev/null 2>&1 || true
   sysctl -p >/dev/null 2>&1 || true
-  ok "卸载完成，所有节点服务及残留已彻底清除。"
+  ok "卸载完成！所有节点服务、证书、配置、二进制及残留已彻底清除。"
 }
 
 # --- 端口跳跃范围校验 ---
