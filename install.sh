@@ -317,13 +317,24 @@ resolve_ip() {
 }
 
 select_reality_sni() {
-  echo -e "\n${BLUE}==============================================================${PLAIN}"
-  echo -e "${BLUE}          VLESS-Reality 真实伪装域名优选设置                 ${PLAIN}"
-  echo -e "${BLUE}==============================================================${PLAIN}"
-  echo -e "  ${GREEN}1.${PLAIN} 智能自动测速优选（从苹果/微软/亚马逊等主流 TLS 1.3 目标中选最低延迟）"
-  echo -e "  ${GREEN}2.${PLAIN} 手动指定自定义伪装域名"
-  read -r -p "请选择伪装策略 [1-2] (默认 1): " SNI_SEL || true
-  SNI_SEL="${SNI_SEL:-1}"
+  if [[ "${AUTO_INSTALL:-0}" -eq 1 ]]; then
+    if [[ -n "${REALITY_SNI:-}" ]]; then
+      REALITY_SNI="$REALITY_SNI"
+      REALITY_HS_SERVER="$(get_sni_dest_ip "$REALITY_SNI")"
+      ok "自动模式使用指定 SNI: ${GREEN}${REALITY_SNI}${PLAIN} (目标: ${REALITY_HS_SERVER})"
+      return 0
+    fi
+    info "自动模式：执行真实伪装候选池智能测速优选..."
+    SNI_SEL=1
+  else
+    echo -e "\n${BLUE}==============================================================${PLAIN}"
+    echo -e "${BLUE}          VLESS-Reality 真实伪装域名优选设置                 ${PLAIN}"
+    echo -e "${BLUE}==============================================================${PLAIN}"
+    echo -e "  ${GREEN}1.${PLAIN} 智能自动测速优选（从苹果/微软/亚马逊等主流 TLS 1.3 目标中选最低延迟）"
+    echo -e "  ${GREEN}2.${PLAIN} 手动指定自定义伪装域名"
+    read -r -p "请选择伪装策略 [1-2] (默认 1): " SNI_SEL || true
+    SNI_SEL="${SNI_SEL:-1}"
+  fi
 
   local BEST_SNI=""
   local BEST_MS=99999
@@ -628,53 +639,83 @@ push_to_manager() {
     SAVED_TAG_A="${SAVED_TAG_ARGO:-}"
   fi
 
-  # 1. 输入面板地址
-  if [[ -n "$SAVED_URL" ]]; then
-    read -r -p "请输入节点管理面板地址 [默认: ${SAVED_URL}]: " P_URL
-    P_URL="${P_URL:-$SAVED_URL}"
-  else
-    while true; do
-      read -r -p "请输入节点管理面板地址 (例如 http://1.2.3.4:5000 或 https://sub.domain.com): " P_URL
-      [[ -n "$P_URL" ]] && break
-      echo -e "${RED}[!] 地址不能为空，请重新输入！${PLAIN}"
-    done
-  fi
-  [[ "$P_URL" != http* ]] && P_URL="http://${P_URL}"
-  MGR_URL="${P_URL%/}"
-
-  # 2. 输入密码或 Token
-  if [[ -n "$SAVED_TOKEN" ]]; then
-    read -r -p "请输入管理面板密码或 Token (WEB_PASSWORD) [默认: 保留上次配置]: " P_TOKEN
-    MGR_TOKEN="${P_TOKEN:-$SAVED_TOKEN}"
-  else
-    while true; do
-      read -r -p "请输入管理面板密码或 Token (WEB_PASSWORD): " P_TOKEN
-      [[ -n "$P_TOKEN" ]] && break
-      echo -e "${RED}[!] 密码或 Token 不能为空，请重新输入！${PLAIN}"
-    done
-    MGR_TOKEN="$P_TOKEN"
-  fi
-
-  # 3. 输入主节点订阅源名称 (Reality / Hy2 / TUIC 三合一)
-  DEF_TAG_M="${SAVED_TAG_M:-}"
-  if [[ -z "$DEF_TAG_M" ]]; then
-    HOST_NAME="$(hostname 2>/dev/null || echo "")"
-    if [[ -n "$HOST_NAME" && "$HOST_NAME" != "localhost" ]]; then
-      DEF_TAG_M="${HOST_NAME}"
-    else
-      DEF_TAG_M="SingBox-VPS"
+  if [[ "${AUTO_INSTALL:-0}" -eq 1 || "${UNATTENDED:-0}" -eq 1 ]]; then
+    # 非交互式自动模式
+    P_URL="${PUSH_URL:-${SAVED_URL:-}}"
+    MGR_TOKEN="${PUSH_TOKEN:-${SAVED_TOKEN:-}}"
+    if [[ -z "$P_URL" || -z "$MGR_TOKEN" ]]; then
+      warn "自动模式下未提供 PUSH_URL 或 PUSH_TOKEN，跳过推送！"
+      return 0
     fi
-  fi
-  read -r -p "请输入主节点订阅源名称 (Reality/Hy2/TUIC 三合一) [默认: ${DEF_TAG_M}]: " P_TAG_M
-  TAG_MAIN="${P_TAG_M:-$DEF_TAG_M}"
+    [[ "$P_URL" != http* ]] && P_URL="http://${P_URL}"
+    MGR_URL="${P_URL%/}"
 
-  # 4. 如果有 Argo 节点，输入 Argo 节点订阅源名称 (单独推送)
-  TAG_ARGO=""
-  if [[ -n "$ARGO_NODE_LINK" ]]; then
-    DEF_TAG_A="${SAVED_TAG_A:-${TAG_MAIN}-Argo}"
-    echo -e "${YELLOW}>>> 检测到已启用 Cloudflare Argo 隧道节点！${PLAIN}"
-    read -r -p "请输入 Argo 节点独立订阅源名称 [默认: ${DEF_TAG_A}]: " P_TAG_A
-    TAG_ARGO="${P_TAG_A:-$DEF_TAG_A}"
+    DEF_TAG_M="${SAVED_TAG_M:-}"
+    if [[ -z "$DEF_TAG_M" ]]; then
+      HOST_NAME="$(hostname 2>/dev/null || echo "")"
+      if [[ -n "$HOST_NAME" && "$HOST_NAME" != "localhost" ]]; then
+        DEF_TAG_M="${HOST_NAME}"
+      else
+        DEF_TAG_M="SingBox-VPS"
+      fi
+    fi
+    TAG_MAIN="${PUSH_TAG_MAIN:-$DEF_TAG_M}"
+
+    TAG_ARGO=""
+    if [[ -n "$ARGO_NODE_LINK" ]]; then
+      DEF_TAG_A="${SAVED_TAG_A:-${TAG_MAIN}-Argo}"
+      TAG_ARGO="${PUSH_TAG_ARGO:-$DEF_TAG_A}"
+    fi
+  else
+    # 交互式模式
+    # 1. 输入面板地址
+    if [[ -n "$SAVED_URL" ]]; then
+      read -r -p "请输入节点管理面板地址 [默认: ${SAVED_URL}]: " P_URL
+      P_URL="${P_URL:-$SAVED_URL}"
+    else
+      while true; do
+        read -r -p "请输入节点管理面板地址 (例如 http://1.2.3.4:5000 或 https://sub.domain.com): " P_URL
+        [[ -n "$P_URL" ]] && break
+        echo -e "${RED}[!] 地址不能为空，请重新输入！${PLAIN}"
+      done
+    fi
+    [[ "$P_URL" != http* ]] && P_URL="http://${P_URL}"
+    MGR_URL="${P_URL%/}"
+
+    # 2. 输入密码或 Token
+    if [[ -n "$SAVED_TOKEN" ]]; then
+      read -r -p "请输入管理面板密码或 Token (WEB_PASSWORD) [默认: 保留上次配置]: " P_TOKEN
+      MGR_TOKEN="${P_TOKEN:-$SAVED_TOKEN}"
+    else
+      while true; do
+        read -r -p "请输入管理面板密码或 Token (WEB_PASSWORD): " P_TOKEN
+        [[ -n "$P_TOKEN" ]] && break
+        echo -e "${RED}[!] 密码或 Token 不能为空，请重新输入！${PLAIN}"
+      done
+      MGR_TOKEN="$P_TOKEN"
+    fi
+
+    # 3. 输入主节点订阅源名称 (Reality / Hy2 / TUIC 三合一)
+    DEF_TAG_M="${SAVED_TAG_M:-}"
+    if [[ -z "$DEF_TAG_M" ]]; then
+      HOST_NAME="$(hostname 2>/dev/null || echo "")"
+      if [[ -n "$HOST_NAME" && "$HOST_NAME" != "localhost" ]]; then
+        DEF_TAG_M="${HOST_NAME}"
+      else
+        DEF_TAG_M="SingBox-VPS"
+      fi
+    fi
+    read -r -p "请输入主节点订阅源名称 (Reality/Hy2/TUIC 三合一) [默认: ${DEF_TAG_M}]: " P_TAG_M
+    TAG_MAIN="${P_TAG_M:-$DEF_TAG_M}"
+
+    # 4. 如果有 Argo 节点，输入 Argo 节点订阅源名称 (单独推送)
+    TAG_ARGO=""
+    if [[ -n "$ARGO_NODE_LINK" ]]; then
+      DEF_TAG_A="${SAVED_TAG_A:-${TAG_MAIN}-Argo}"
+      echo -e "${YELLOW}>>> 检测到已启用 Cloudflare Argo 隧道节点！${PLAIN}"
+      read -r -p "请输入 Argo 节点独立订阅源名称 [默认: ${DEF_TAG_A}]: " P_TAG_A
+      TAG_ARGO="${P_TAG_A:-$DEF_TAG_A}"
+    fi
   fi
 
   echo -e "\n${BLUE}正在连接面板并推送节点...${PLAIN}"
@@ -1081,7 +1122,9 @@ LOCAL_IPV6="$(ip -6 route get 2606:4700:4700::1111 2>/dev/null | awk '{for(i=1;i
 [[ -z "${LOCAL_IPV6:-}" ]] && LOCAL_IPV6="${IPV6:-}"
 
 OUT_MODE="ipv4"
-if [[ "$HAS_V4" -eq 1 && "$HAS_V6" -eq 1 ]]; then
+if [[ "${AUTO_INSTALL:-0}" -eq 1 ]]; then
+  OUT_MODE="${SB_OUT_MODE:-${OUT_MODE:-ipv4}}"
+elif [[ "$HAS_V4" -eq 1 && "$HAS_V6" -eq 1 ]]; then
   echo -e "--------------------------------------------------------------"
   echo -e "检测到双栈 VPS，请选择节点输出地址模式："
   echo -e "  1) 仅输出 IPv4 (推荐，最通用兼容)"
@@ -1106,16 +1149,22 @@ echo -e "\n${YELLOW}[3/10] 核心协议选择 (精简三大王牌协议)...${PLA
 echo -e "--------------------------------------------------------------"
 
 ENABLE_REALITY=1
-read -r -p "是否启用 VLESS-Reality (TCP 顶流、免证书、抗封锁) [Y/n] (默认 Y): " ANS_R || true
-[[ "$ANS_R" =~ ^[Nn]$ ]] && ENABLE_REALITY=0
-
 ENABLE_HY2=1
-read -r -p "是否启用 Hysteria 2 (UDP 极速、丢包克星、端口跳跃) [Y/n] (默认 Y): " ANS_H || true
-[[ "$ANS_H" =~ ^[Nn]$ ]] && ENABLE_HY2=0
-
 ENABLE_TUIC=1
-read -r -p "是否启用 TUIC v5 (QUIC 低延迟、高速备用栈) [Y/n] (默认 Y): " ANS_T || true
-[[ "$ANS_T" =~ ^[Nn]$ ]] && ENABLE_TUIC=0
+if [[ "${AUTO_INSTALL:-0}" -eq 1 ]]; then
+  ENABLE_REALITY="${SB_ENABLE_REALITY:-1}"
+  ENABLE_HY2="${SB_ENABLE_HY2:-1}"
+  ENABLE_TUIC="${SB_ENABLE_TUIC:-1}"
+else
+  read -r -p "是否启用 VLESS-Reality (TCP 顶流、免证书、抗封锁) [Y/n] (默认 Y): " ANS_R || true
+  [[ "$ANS_R" =~ ^[Nn]$ ]] && ENABLE_REALITY=0
+
+  read -r -p "是否启用 Hysteria 2 (UDP 极速、丢包克星、端口跳跃) [Y/n] (默认 Y): " ANS_H || true
+  [[ "$ANS_H" =~ ^[Nn]$ ]] && ENABLE_HY2=0
+
+  read -r -p "是否启用 TUIC v5 (QUIC 低延迟、高速备用栈) [Y/n] (默认 Y): " ANS_T || true
+  [[ "$ANS_T" =~ ^[Nn]$ ]] && ENABLE_TUIC=0
+fi
 
 if [[ "$ENABLE_REALITY" -eq 0 && "$ENABLE_HY2" -eq 0 && "$ENABLE_TUIC" -eq 0 ]]; then
   warn "未启用任何协议，默认强制启用 VLESS-Reality！"
@@ -1136,34 +1185,73 @@ PROTO_COUNT=$((ENABLE_REALITY + ENABLE_HY2 + ENABLE_TUIC))
 TOTAL_PORTS=$PROTO_COUNT
 [[ "$OUT_MODE" == "both" ]] && TOTAL_PORTS=$((PROTO_COUNT * 2))
 
-read -r -p "请输入服务起始基础端口 (回车自动随机安全高位端口): " BASE_PORT || true
-if [[ -z "${BASE_PORT:-}" ]] || ! [[ "$BASE_PORT" =~ ^[0-9]+$ ]] || [[ "$BASE_PORT" -lt 1024 || "$((BASE_PORT + TOTAL_PORTS))" -gt 65535 ]]; then
-  BASE_PORT="$(find_free_base_port "$TOTAL_PORTS")"
-fi
+if [[ "${AUTO_INSTALL:-0}" -eq 1 ]]; then
+  # 自动部署模式
+  if [[ -n "${PORT_REALITY:-}" || -n "${PORT_HY2:-}" || -n "${PORT_TUIC:-}" ]]; then
+    # 直接使用显式指定的端口 (如 NAT 受限端口分配)
+    P_REALITY_V4="${PORT_REALITY:-0}"
+    P_REALITY_V6="${PORT_REALITY:-0}"
+    P_HY2_V4="${PORT_HY2:-0}"
+    P_HY2_V6="${PORT_HY2:-0}"
+    P_TUIC_V4="${PORT_TUIC:-0}"
+    P_TUIC_V6="${PORT_TUIC:-0}"
+  else
+    BASE_PORT="${BASE_PORT:-}"
+    if [[ -z "${BASE_PORT:-}" ]] || ! [[ "$BASE_PORT" =~ ^[0-9]+$ ]] || [[ "$BASE_PORT" -lt 1024 || "$((BASE_PORT + TOTAL_PORTS))" -gt 65535 ]]; then
+      BASE_PORT="$(find_free_base_port "$TOTAL_PORTS")"
+    fi
+    BASE_V4="$BASE_PORT"
+    BASE_V6="$((BASE_V4 + PROTO_COUNT))"
+    cur_offset=0
+    P_REALITY_V4=0; P_REALITY_V6=0
+    P_HY2_V4=0; P_HY2_V6=0
+    P_TUIC_V4=0; P_TUIC_V6=0
+    if [[ "$ENABLE_REALITY" -eq 1 ]]; then
+      P_REALITY_V4=$((BASE_V4 + cur_offset))
+      P_REALITY_V6=$((BASE_V6 + cur_offset))
+      cur_offset=$((cur_offset + 1))
+    fi
+    if [[ "$ENABLE_HY2" -eq 1 ]]; then
+      P_HY2_V4=$((BASE_V4 + cur_offset))
+      P_HY2_V6=$((BASE_V6 + cur_offset))
+      cur_offset=$((cur_offset + 1))
+    fi
+    if [[ "$ENABLE_TUIC" -eq 1 ]]; then
+      P_TUIC_V4=$((BASE_V4 + cur_offset))
+      P_TUIC_V6=$((BASE_V6 + cur_offset))
+    fi
+  fi
+  HOP_RANGE="${SB_HOP_RANGE:-${HOP_RANGE:-}}"
+else
+  read -r -p "请输入服务起始基础端口 (回车自动随机安全高位端口): " BASE_PORT || true
+  if [[ -z "${BASE_PORT:-}" ]] || ! [[ "$BASE_PORT" =~ ^[0-9]+$ ]] || [[ "$BASE_PORT" -lt 1024 || "$((BASE_PORT + TOTAL_PORTS))" -gt 65535 ]]; then
+    BASE_PORT="$(find_free_base_port "$TOTAL_PORTS")"
+  fi
 
-BASE_V4="$BASE_PORT"
-BASE_V6="$((BASE_V4 + PROTO_COUNT))"
+  BASE_V4="$BASE_PORT"
+  BASE_V6="$((BASE_V4 + PROTO_COUNT))"
 
-# 动态顺序分配端口
-cur_offset=0
-P_REALITY_V4=0; P_REALITY_V6=0
-P_HY2_V4=0; P_HY2_V6=0
-P_TUIC_V4=0; P_TUIC_V6=0
+  # 动态顺序分配端口
+  cur_offset=0
+  P_REALITY_V4=0; P_REALITY_V6=0
+  P_HY2_V4=0; P_HY2_V6=0
+  P_TUIC_V4=0; P_TUIC_V6=0
 
-if [[ "$ENABLE_REALITY" -eq 1 ]]; then
-  P_REALITY_V4=$((BASE_V4 + cur_offset))
-  P_REALITY_V6=$((BASE_V6 + cur_offset))
-  cur_offset=$((cur_offset + 1))
-fi
-if [[ "$ENABLE_HY2" -eq 1 ]]; then
-  P_HY2_V4=$((BASE_V4 + cur_offset))
-  P_HY2_V6=$((BASE_V6 + cur_offset))
-  cur_offset=$((cur_offset + 1))
-fi
-if [[ "$ENABLE_TUIC" -eq 1 ]]; then
-  P_TUIC_V4=$((BASE_V4 + cur_offset))
-  P_TUIC_V6=$((BASE_V6 + cur_offset))
-  cur_offset=$((cur_offset + 1))
+  if [[ "$ENABLE_REALITY" -eq 1 ]]; then
+    P_REALITY_V4=$((BASE_V4 + cur_offset))
+    P_REALITY_V6=$((BASE_V6 + cur_offset))
+    cur_offset=$((cur_offset + 1))
+  fi
+  if [[ "$ENABLE_HY2" -eq 1 ]]; then
+    P_HY2_V4=$((BASE_V4 + cur_offset))
+    P_HY2_V6=$((BASE_V6 + cur_offset))
+    cur_offset=$((cur_offset + 1))
+  fi
+  if [[ "$ENABLE_TUIC" -eq 1 ]]; then
+    P_TUIC_V4=$((BASE_V4 + cur_offset))
+    P_TUIC_V6=$((BASE_V6 + cur_offset))
+    cur_offset=$((cur_offset + 1))
+  fi
 fi
 
 echo -e ">>> 端口规划完成:"
@@ -1172,8 +1260,8 @@ echo -e ">>> 端口规划完成:"
 [[ "$ENABLE_TUIC" -eq 1 ]] && echo -e "  TUIC 端口   : ${GREEN}${P_TUIC_V4}${PLAIN} $([[ "$OUT_MODE" == "both" ]] && echo "(v6: ${P_TUIC_V6})")"
 
 # Hysteria 2 端口跳跃交互
-HOP_RANGE=""
-if [[ "$ENABLE_HY2" -eq 1 ]]; then
+HOP_RANGE="${HOP_RANGE:-}"
+if [[ "$ENABLE_HY2" -eq 1 && "${AUTO_INSTALL:-0}" -ne 1 ]]; then
   echo -e "--------------------------------------------------------------"
   CUR_HOP="${SB_HOP_RANGE:-}"
   if [[ -n "$CUR_HOP" ]]; then
@@ -1235,52 +1323,69 @@ if [[ "$ENABLE_HY2" -eq 1 || "$ENABLE_TUIC" -eq 1 ]]; then
   echo -e "Hysteria 2 / TUIC v5 证书模式："
   echo -e "  1. 快速免域名自签证书 (10年有效，SNI=www.bing.com，客户端自动开启跳过证书校验)"
   echo -e "  2. 使用自有域名 (通过 acme.sh 自动申请免费 Let's Encrypt 证书)"
-  read -r -p "请选择证书模式 [1-2] (默认 1): " C_SEL || true
-  C_SEL="${C_SEL:-1}"
-
-  ACME_MODE="standalone"
-  CF_TOKEN=""
-
-  if [[ "$C_SEL" == "2" ]]; then
-    read -r -p "请输入你的域名: " INPUT_DOMAIN || true
-    if [[ -n "${INPUT_DOMAIN:-}" ]]; then
-      DOMAIN="$INPUT_DOMAIN"
+  if [[ "${AUTO_INSTALL:-0}" -eq 1 ]]; then
+    ACME_MODE="${SB_ACME_MODE:-${ACME_MODE:-dns}}"
+    CF_TOKEN="${SB_CF_TOKEN:-${CF_TOKEN:-}}"
+    if [[ -n "${INPUT_DOMAIN:-${DOMAIN:-}}" ]]; then
+      DOMAIN="${INPUT_DOMAIN:-$DOMAIN}"
       SNI_HOST="$DOMAIN"
       CERT_INSECURE=0
       CERT_MODE="acme"
+      ok "自动模式使用自有域名申请证书: ${DOMAIN} (验证模式: ${ACME_MODE})"
+    else
+      CERT_MODE="self"
+      SNI_HOST="www.bing.com"
+      CERT_INSECURE=1
+      info "自动模式未指定域名，默认使用 10 年 ECC 自签证书"
+    fi
+  else
+    read -r -p "请选择证书模式 [1-2] (默认 1): " C_SEL || true
+    C_SEL="${C_SEL:-1}"
 
-      echo -e "--------------------------------------------------------------"
-      echo -e "请选择 ACME 证书申请验证方式："
-      echo -e "  1. Cloudflare DNS-01 验证 (推荐：输入 CF Token，免开 80 端口，不怕 CDN 阻断)"
-      echo -e "  2. Standalone HTTP-01 验证 (需 VPS 80 端口可用且域名直接解析到本机 IP)"
-      read -r -p "请选择验证方式 [1-2] (默认 1): " ACME_SEL || true
-      ACME_SEL="${ACME_SEL:-1}"
+    ACME_MODE="standalone"
+    CF_TOKEN=""
 
-      if [[ "$ACME_SEL" == "1" ]]; then
-        ACME_MODE="dns"
-        # 尝试复用历史 CF Token
-        if [[ -f "$STATE_FILE" ]]; then
-          source "$STATE_FILE" >/dev/null 2>&1 || true
-          CF_TOKEN="${SB_CF_TOKEN:-}"
-        fi
-        if [[ -n "$CF_TOKEN" ]]; then
-          echo -e "检测到历史 Cloudflare Token: ${GREEN}${CF_TOKEN:0:6}******${PLAIN}"
-          read -r -p "是否直接复用此 Token? [Y/n] (默认 Y): " REUSE_CF || true
-          [[ "$REUSE_CF" =~ ^[Nn]$ ]] && CF_TOKEN=""
-        fi
-        if [[ -z "$CF_TOKEN" ]]; then
-          read -r -p "请输入 Cloudflare API Token (需具备 Zone.DNS 编辑权限): " INPUT_CF_TOKEN || true
-          CF_TOKEN="$INPUT_CF_TOKEN"
-        fi
-        if [[ -z "$CF_TOKEN" ]]; then
-          warn "未输入 Cloudflare API Token，已自动切换为 Standalone HTTP-01 验证方式"
+    if [[ "$C_SEL" == "2" ]]; then
+      read -r -p "请输入你的域名: " INPUT_DOMAIN || true
+      if [[ -n "${INPUT_DOMAIN:-}" ]]; then
+        DOMAIN="$INPUT_DOMAIN"
+        SNI_HOST="$DOMAIN"
+        CERT_INSECURE=0
+        CERT_MODE="acme"
+
+        echo -e "--------------------------------------------------------------"
+        echo -e "请选择 ACME 证书申请验证方式："
+        echo -e "  1. Cloudflare DNS-01 验证 (推荐：输入 CF Token，免开 80 端口，不怕 CDN 阻断)"
+        echo -e "  2. Standalone HTTP-01 验证 (需 VPS 80 端口可用且域名直接解析到本机 IP)"
+        read -r -p "请选择验证方式 [1-2] (默认 1): " ACME_SEL || true
+        ACME_SEL="${ACME_SEL:-1}"
+
+        if [[ "$ACME_SEL" == "1" ]]; then
+          ACME_MODE="dns"
+          # 尝试复用历史 CF Token
+          if [[ -f "$STATE_FILE" ]]; then
+            source "$STATE_FILE" >/dev/null 2>&1 || true
+            CF_TOKEN="${SB_CF_TOKEN:-}"
+          fi
+          if [[ -n "$CF_TOKEN" ]]; then
+            echo -e "检测到历史 Cloudflare Token: ${GREEN}${CF_TOKEN:0:6}******${PLAIN}"
+            read -r -p "是否直接复用此 Token? [Y/n] (默认 Y): " REUSE_CF || true
+            [[ "$REUSE_CF" =~ ^[Nn]$ ]] && CF_TOKEN=""
+          fi
+          if [[ -z "$CF_TOKEN" ]]; then
+            read -r -p "请输入 Cloudflare API Token (需具备 Zone.DNS 编辑权限): " INPUT_CF_TOKEN || true
+            CF_TOKEN="$INPUT_CF_TOKEN"
+          fi
+          if [[ -z "$CF_TOKEN" ]]; then
+            warn "未输入 Cloudflare API Token，已自动切换为 Standalone HTTP-01 验证方式"
+            ACME_MODE="standalone"
+          fi
+        else
           ACME_MODE="standalone"
         fi
       else
-        ACME_MODE="standalone"
+        warn "未输入有效域名，自动使用自签证书模式"
       fi
-    else
-      warn "未输入有效域名，自动使用自签证书模式"
     fi
   fi
 
@@ -1353,9 +1458,13 @@ fi
 # ==============================================================================
 echo -e "\n${YELLOW}[6/10] Cloudflare WARP 智能分流设置...${PLAIN}"
 echo -e "说明：开启后仅将 ChatGPT、Claude、Gemini、Netflix 等 AI 与流媒体域名走 WARP 出口，解锁风控，其他流量保持 VPS 原生千兆直连！"
-read -r -p "是否启用 WARP 智能分流? [y/N] (默认 N): " ANS_WARP || true
 ENABLE_WARP=0
-[[ "$ANS_WARP" =~ ^[Yy]$ ]] && ENABLE_WARP=1
+if [[ "${AUTO_INSTALL:-0}" -eq 1 ]]; then
+  ENABLE_WARP="${SB_ENABLE_WARP:-${ENABLE_WARP:-0}}"
+else
+  read -r -p "是否启用 WARP 智能分流? [y/N] (默认 N): " ANS_WARP || true
+  [[ "$ANS_WARP" =~ ^[Yy]$ ]] && ENABLE_WARP=1
+fi
 
 WARP_CFG_READY=0
 WARP_PRIV=""
@@ -1433,7 +1542,11 @@ if [[ -f "$STATE_FILE" ]]; then
   ARGO_DOMAIN="${SB_ARGO_DOMAIN:-}"
 fi
 
-if [[ -n "${ARGO_TOKEN:-}" && -n "${ARGO_DOMAIN:-}" ]]; then
+if [[ "${AUTO_INSTALL:-0}" -eq 1 ]]; then
+  ARGO_TOKEN="${SB_ARGO_TOKEN:-${ARGO_TOKEN:-}}"
+  ARGO_DOMAIN="${SB_ARGO_DOMAIN:-${ARGO_DOMAIN:-}}"
+  [[ -z "$ARGO_DOMAIN" ]] && ARGO_TOKEN=""
+elif [[ -n "${ARGO_TOKEN:-}" && -n "${ARGO_DOMAIN:-}" ]]; then
   echo -e "检测到现有 Argo 隧道配置 (域名: ${GREEN}${ARGO_DOMAIN}${PLAIN})"
   read -r -p "是否保留此 Argo 隧道? [Y/n/修改] (默认 Y): " REUSE_ARGO || true
   if [[ "$REUSE_ARGO" =~ ^[Nn]$ ]]; then
@@ -2006,13 +2119,22 @@ echo -e ">>> 随时输入 ${GREEN}sb${PLAIN} 查看所有节点链接与 Mihomo 
 echo -e "${BLUE}==============================================================${PLAIN}"
 echo -e "${BLUE}        🚀 自动推送到节点管理平台 (cf-node-manager-plus)       ${PLAIN}"
 echo -e "${BLUE}==============================================================${PLAIN}"
-read -r -p "是否将本次生成的节点自动推送到节点管理面板? [Y/n] (默认: Y): " DO_PUSH
-DO_PUSH="${DO_PUSH:-Y}"
-case "$DO_PUSH" in
-  [nN]|[nN][oO])
-    echo -e "已跳过自动推送。后续可随时输入 ${GREEN}sb push${PLAIN} 推送节点至管理平台！\n"
-    ;;
-  *)
-    "$SHORTCUT_BIN" push
-    ;;
-esac
+if [[ "${AUTO_INSTALL:-0}" -eq 1 ]]; then
+  if [[ "${AUTO_PUSH:-1}" -eq 1 && -n "${PUSH_URL:-${SAVED_MGR_URL:-}}" ]]; then
+    info "自动部署模式：正在执行节点推送到管理平台..."
+    "$SHORTCUT_BIN" push || true
+  else
+    info "自动部署模式：已跳过节点推送。"
+  fi
+else
+  read -r -p "是否将本次生成的节点自动推送到节点管理面板? [Y/n] (默认: Y): " DO_PUSH
+  DO_PUSH="${DO_PUSH:-Y}"
+  case "$DO_PUSH" in
+    [nN]|[nN][oO])
+      echo -e "已跳过自动推送。后续可随时输入 ${GREEN}sb push${PLAIN} 推送节点至管理平台！\n"
+      ;;
+    *)
+      "$SHORTCUT_BIN" push
+      ;;
+  esac
+fi
