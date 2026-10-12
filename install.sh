@@ -1619,7 +1619,13 @@ else
     ARGO_DOMAIN="$INPUT_ARGO_DOMAIN"
     [[ -z "$ARGO_DOMAIN" ]] && ARGO_TOKEN=""
   fi
+if [[ -n "${ARGO_TOKEN:-}" ]]; then
+  if [[ "$ARGO_TOKEN" =~ eyJ ]]; then
+    ARGO_TOKEN="eyJ${ARGO_TOKEN#*eyJ}"
+    ARGO_TOKEN=$(echo "$ARGO_TOKEN" | awk '{print $1}' | tr -d '"'\''`;')
+  fi
 fi
+
 if [[ -n "${ARGO_TOKEN:-}" && -n "${ARGO_DOMAIN:-}" ]]; then
   ok "Argo 隧道已配置: 域名 ${ARGO_DOMAIN}"
 else
