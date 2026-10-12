@@ -2118,8 +2118,11 @@ fi
 if [[ -n "${ARGO_TOKEN:-}" && -n "${ARGO_DOMAIN:-}" ]]; then
   info "正在配置 Cloudflare Argo 隧道 (cloudflared)..."
   local_arch="$(_arch_norm)"
-  if ! command -v cloudflared >/dev/null 2>&1; then
+
+  # 校验当前已有二进制是否完整可用，若损坏则强制清理重新下载
+  if ! /usr/local/bin/cloudflared --version >/dev/null 2>&1; then
     info "正在下载 cloudflared 核心守护程序..."
+    rm -f /usr/local/bin/cloudflared 2>/dev/null || true
     CF_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${local_arch}"
     curl -fsSL --connect-timeout 8 -m 60 "$CF_URL" -o /usr/local/bin/cloudflared 2>/dev/null || \
     curl -fsSL --connect-timeout 8 -m 60 "https://mirror.ghproxy.com/$CF_URL" -o /usr/local/bin/cloudflared 2>/dev/null || \
@@ -2127,28 +2130,48 @@ if [[ -n "${ARGO_TOKEN:-}" && -n "${ARGO_DOMAIN:-}" ]]; then
     wget -q -T 30 -O /usr/local/bin/cloudflared "$CF_URL" || true
     chmod +x /usr/local/bin/cloudflared >/dev/null 2>&1 || true
   fi
-  if command -v cloudflared >/dev/null 2>&1; then
+
+  if ! /usr/local/bin/cloudflared --version >/dev/null 2>&1; then
+    warn "cloudflared 守护程序下载或校验失败，Argo 隧道启动暂时受阻，其他协议服务不受影响！"
+  else
+    ok "cloudflared 核心校验通过 ($(/usr/local/bin/cloudflared --version 2>/dev/null | head -n1))"
     if has_systemd; then
-      timeout 15 cloudflared service install "$ARGO_TOKEN" >/dev/null 2>&1 || true
-      mkdir -p /etc/systemd/system/cloudflared.service.d >/dev/null 2>&1 || true
-      cat > /etc/systemd/system/cloudflared.service.d/override.conf <<EOF
+      systemctl stop cloudflared >/dev/null 2>&1 || true
+      rm -rf /etc/systemd/system/cloudflared.service.d 2>/dev/null || true
+      cat > /etc/systemd/system/cloudflared.service <<EOF
+[Unit]
+Description=Cloudflare Tunnel Agent (cloudflared)
+After=network-online.target
+Wants=network-online.target
+
 [Service]
 Type=simple
 TimeoutStartSec=15
-ExecStart=
-ExecStart=/usr/local/bin/cloudflared --no-autoupdate tunnel run --protocol http2 --token ${ARGO_TOKEN}
+ExecStart=/usr/local/bin/cloudflared --no-autoupdate tunnel run --token ${ARGO_TOKEN}
 Restart=on-failure
 RestartSec=5s
+KillMode=mixed
+
+[Install]
+WantedBy=multi-user.target
 EOF
       systemctl daemon-reload >/dev/null 2>&1 || true
-      timeout 15 systemctl restart cloudflared >/dev/null 2>&1 || true
       systemctl enable cloudflared >/dev/null 2>&1 || true
+      timeout 15 systemctl restart cloudflared >/dev/null 2>&1 || true
+      sleep 2
+      if systemctl is-active cloudflared >/dev/null 2>&1 || pgrep -f cloudflared >/dev/null 2>&1; then
+        ok "Cloudflare Argo 隧道守护进程已配置启动并正常在线！"
+      else
+        warn "Cloudflare Argo 守护进程未进入 active 状态，可能 Token 权限异常或边缘握手失败:"
+        systemctl status cloudflared --no-pager 2>&1 | head -n 12 || true
+      fi
     elif has_openrc; then
+      rc-service cloudflared stop >/dev/null 2>&1 || true
       cat > /etc/init.d/cloudflared <<EOF
 #!/sbin/openrc-run
 name="cloudflared"
 command="/usr/local/bin/cloudflared"
-command_args="tunnel run --protocol http2 --token ${ARGO_TOKEN}"
+command_args="--no-autoupdate tunnel run --token ${ARGO_TOKEN}"
 command_background=true
 pidfile="/run/cloudflared.pid"
 depend() { need net; }
@@ -2156,8 +2179,13 @@ EOF
       chmod +x /etc/init.d/cloudflared
       rc-update add cloudflared default >/dev/null 2>&1 || true
       rc-service cloudflared restart >/dev/null 2>&1 || true
+      sleep 2
+      if pgrep -f cloudflared >/dev/null 2>&1; then
+        ok "Cloudflare Argo 隧道守护进程 (OpenRC) 已配置启动并正常在线！"
+      else
+        warn "Cloudflare Argo 守护进程 (OpenRC) 启动异常"
+      fi
     fi
-    ok "Cloudflare Argo 隧道守护进程已配置启动！"
   fi
 fi
 
