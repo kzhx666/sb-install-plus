@@ -703,16 +703,16 @@ push_to_manager() {
     if [[ -z "$DEF_TAG_M" ]]; then
       HOST_NAME="$(hostname 2>/dev/null || echo "")"
       if [[ -n "$HOST_NAME" && "$HOST_NAME" != "localhost" ]]; then
-        DEF_TAG_M="${HOST_NAME}"
+        DEF_TAG_M="${HOST_NAME}本机"
       else
-        DEF_TAG_M="SingBox-VPS"
+        DEF_TAG_M="SingBox本机"
       fi
     fi
     TAG_MAIN="${PUSH_TAG_MAIN:-$DEF_TAG_M}"
 
     TAG_ARGO=""
     if [[ -n "$ARGO_NODE_LINK" ]]; then
-      DEF_TAG_A="${SAVED_TAG_A:-${TAG_MAIN}-Argo}"
+      DEF_TAG_A="${SAVED_TAG_A:-${TAG_MAIN%本机}优选}"
       TAG_ARGO="${PUSH_TAG_ARGO:-$DEF_TAG_A}"
     fi
   else
@@ -749,9 +749,9 @@ push_to_manager() {
     if [[ -z "$DEF_TAG_M" ]]; then
       HOST_NAME="$(hostname 2>/dev/null || echo "")"
       if [[ -n "$HOST_NAME" && "$HOST_NAME" != "localhost" ]]; then
-        DEF_TAG_M="${HOST_NAME}"
+        DEF_TAG_M="${HOST_NAME}本机"
       else
-        DEF_TAG_M="SingBox-VPS"
+        DEF_TAG_M="SingBox本机"
       fi
     fi
     read -r -p "请输入主节点订阅源名称 (Reality/Hy2/TUIC 三合一) [默认: ${DEF_TAG_M}]: " P_TAG_M
@@ -760,7 +760,7 @@ push_to_manager() {
     # 4. 如果有 Argo 节点，输入 Argo 节点订阅源名称 (单独推送)
     TAG_ARGO=""
     if [[ -n "$ARGO_NODE_LINK" ]]; then
-      DEF_TAG_A="${SAVED_TAG_A:-${TAG_MAIN}-Argo}"
+      DEF_TAG_A="${SAVED_TAG_A:-${TAG_MAIN%本机}优选}"
       echo -e "${YELLOW}>>> 检测到已启用 Cloudflare Argo 隧道节点！${PLAIN}"
       read -r -p "请输入 Argo 节点独立订阅源名称 [默认: ${DEF_TAG_A}]: " P_TAG_A
       TAG_ARGO="${P_TAG_A:-$DEF_TAG_A}"
