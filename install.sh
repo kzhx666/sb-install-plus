@@ -1071,7 +1071,9 @@ manage_port_hop(){
 # ==============================================================================
 # [主菜单系统]
 # ==============================================================================
-if [[ -z "${1:-}" ]]; then
+if [[ "${AUTO_INSTALL:-0}" == "1" || "${1:-}" == "--auto" || "${1:-}" == "auto" ]]; then
+  info "检测到集群管理/无人值守部署模式 (AUTO_INSTALL=1)，跳过主菜单交互并按指定参数自动配置..."
+elif [[ -z "${1:-}" ]]; then
   clear
   echo -e "${BLUE}==============================================================${PLAIN}"
   echo -e "${BLUE}   Sing-box 现代极速终极版 v7.0 (VLESS-Reality / Hy2 / TUIC v5) ${PLAIN}"
@@ -1619,6 +1621,8 @@ else
     ARGO_DOMAIN="$INPUT_ARGO_DOMAIN"
     [[ -z "$ARGO_DOMAIN" ]] && ARGO_TOKEN=""
   fi
+fi
+
 if [[ -n "${ARGO_TOKEN:-}" ]]; then
   if [[ "$ARGO_TOKEN" =~ eyJ ]]; then
     ARGO_TOKEN="eyJ${ARGO_TOKEN#*eyJ}"
