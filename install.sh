@@ -218,8 +218,19 @@ _arch_norm(){
 apply_tuning() {
   info "正在应用极速网络内核参数调优 (BBR + 64MB UDP缓冲 + TCP Fast Open + TFO)..."
 
-  # 1. 尝试加载 BBR 内核模块
+  # 1. 尝试加载 BBRv3 / BBR 内核模块
+  modprobe tcp_bbr3 2>/dev/null || true
   modprobe tcp_bbr 2>/dev/null || true
+
+  local avail_cc target_cc="bbr"
+  avail_cc="$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null || cat /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null || echo "")"
+  if echo "$avail_cc" | grep -qw "bbr3"; then
+    target_cc="bbr3"
+  elif echo "$avail_cc" | grep -qw "bbr"; then
+    target_cc="bbr"
+  elif echo "$avail_cc" | grep -qw "bbrplus"; then
+    target_cc="bbrplus"
+  fi
 
   # 2. 检查内存大小自适应缓冲区 (单位 KB)
   local mem_kb buf_max backlog
@@ -246,9 +257,9 @@ net.core.wmem_default=2621440
 net.ipv4.udp_rmem_min=16384
 net.ipv4.udp_wmem_min=16384
 
-# --- TCP 极速传输与 BBR 拥塞控制 ---
+# --- TCP 极速传输与 BBR / BBRv3 拥塞控制 ---
 net.core.default_qdisc=fq
-net.ipv4.tcp_congestion_control=bbr
+net.ipv4.tcp_congestion_control=${target_cc}
 net.ipv4.tcp_rmem=4096 87380 ${buf_max}
 net.ipv4.tcp_wmem=4096 65536 ${buf_max}
 
@@ -277,8 +288,8 @@ EOF
   # 5. 回读验证 BBR 状态
   local cc
   cc="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true)"
-  if [[ "$cc" == "bbr" ]]; then
-    ok "BBR 拥塞控制与 64MB UDP 巨型缓冲调优已成功激活！"
+  if [[ "$cc" =~ ^(bbr|bbr3|bbrplus)$ ]]; then
+    ok "BBR 拥塞控制 (${cc}) 与 64MB UDP 巨型缓冲调优已成功激活！"
   else
     warn "当前系统内核暂未直接返回 BBR (当前: ${cc:-未知})，已完成高并发与缓冲区配置"
   fi
