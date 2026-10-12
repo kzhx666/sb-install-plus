@@ -519,6 +519,33 @@ update_core(){
 # --- 卸载逻辑 ---
 do_uninstall(){
   info "正在彻底卸载 Sing-box 及全部关联配置与服务..."
+
+  # 🌟 若曾推送到节点管理平台 (cf-node-manager-plus)，在删除本地配置前自动调用 API 注销删除该节点的订阅源
+  MGR_CONF="/etc/sing-box/.mgr_conf"
+  if [[ -f "$MGR_CONF" ]]; then
+    # shellcheck disable=SC1090
+    source "$MGR_CONF" 2>/dev/null || true
+    if [[ -n "${SAVED_MGR_URL:-}" && -n "${SAVED_MGR_TOKEN:-}" ]]; then
+      TAGS_DEL=()
+      [[ -n "${SAVED_TAG_MAIN:-}" ]] && TAGS_DEL+=("${SAVED_TAG_MAIN}")
+      [[ -n "${SAVED_TAG_ARGO:-}" ]] && TAGS_DEL+=("${SAVED_TAG_ARGO}")
+      if [[ ${#TAGS_DEL[@]} -gt 0 ]]; then
+        info "正在通知节点管理平台 (${SAVED_MGR_URL}) 注销并清除订阅源: ${TAGS_DEL[*]} ..."
+        DEL_PAYLOAD="$(jq -n --argjson tags "$(printf '%s\n' "${TAGS_DEL[@]}" | jq -R . | jq -s .)" --arg token "${SAVED_MGR_TOKEN}" '{tags: $tags, token: $token}')"
+        DEL_RESP="$(curl -s -S -X POST "${SAVED_MGR_URL}/api/delete_pushed_nodes" \
+          -H "Content-Type: application/json" \
+          -H "Authorization: Bearer ${SAVED_MGR_TOKEN}" \
+          --connect-timeout 8 --max-time 15 \
+          -d "$DEL_PAYLOAD" 2>&1 || true)"
+        if echo "$DEL_RESP" | grep -q '"status"[[:space:]]*:[[:space:]]*"success"'; then
+          ok "节点管理平台中的关联订阅源已成功注销并清理！"
+        else
+          warn "向节点管理平台请求删除订阅源时响应: ${DEL_RESP}"
+        fi
+      fi
+    fi
+  fi
+
   service_disable
   
   # 停止并卸载 Cloudflare Argo tunnel 守护进程
@@ -667,14 +694,14 @@ for i in "${!HOSTS[@]}"; do
     [[ "$LABEL" == "IPv6" ]] && PORT="${SB_HY2_P6}"
     HOP_PARAM=""
     [[ -n "${SB_HOP_RANGE:-}" ]] && HOP_PARAM="&ports=${SB_HOP_RANGE}&mport=${SB_HOP_RANGE}"
-    LINK="hysteria2://${SB_HY2_PASS}@${UHOST}:${PORT}?insecure=${SB_CERT_INSECURE}&sni=${SB_SNI_HOST}&alpn=h3${HOP_PARAM}#Hysteria2${SUFFIX}"
+    LINK="hysteria2://${SB_HY2_PASS}@${UHOST}:${PORT}?insecure=${SB_CERT_INSECURE}&allowInsecure=${SB_CERT_INSECURE}&allow_insecure=${SB_CERT_INSECURE}&skip-cert-verify=${SB_CERT_INSECURE}&sni=${SB_SNI_HOST}&alpn=h3${HOP_PARAM}#Hysteria2${SUFFIX}"
     MAIN_NODES_LIST+=("$LINK")
   fi
 
   if [[ "${SB_ENABLE_TUIC:-0}" == "1" ]]; then
     PORT="${SB_TUIC_P4}"
     [[ "$LABEL" == "IPv6" ]] && PORT="${SB_TUIC_P6}"
-    LINK="tuic://${SB_TUIC_UUID}:${SB_TUIC_PASS}@${UHOST}:${PORT}?congestion_control=bbr&alpn=h3&sni=${SB_SNI_HOST}&allow_insecure=${SB_CERT_INSECURE}&insecure=${SB_CERT_INSECURE}&version=5&udp_relay_mode=native#TUIC${SUFFIX}"
+    LINK="tuic://${SB_TUIC_UUID}:${SB_TUIC_PASS}@${UHOST}:${PORT}?congestion_control=bbr&alpn=h3&sni=${SB_SNI_HOST}&allow_insecure=${SB_CERT_INSECURE}&allowInsecure=${SB_CERT_INSECURE}&insecure=${SB_CERT_INSECURE}&skip-cert-verify=${SB_CERT_INSECURE}&version=5&udp_relay_mode=native#TUIC${SUFFIX}"
     MAIN_NODES_LIST+=("$LINK")
   fi
 done
@@ -899,14 +926,14 @@ for i in "${!HOSTS[@]}"; do
     [[ "$LABEL" == "IPv6" ]] && PORT="${SB_HY2_P6}"
     HOP_PARAM=""
     [[ -n "${SB_HOP_RANGE:-}" ]] && HOP_PARAM="&ports=${SB_HOP_RANGE}&mport=${SB_HOP_RANGE}"
-    LINK="hysteria2://${SB_HY2_PASS}@${UHOST}:${PORT}?insecure=${SB_CERT_INSECURE}&sni=${SB_SNI_HOST}&alpn=h3${HOP_PARAM}#Hysteria2${SUFFIX}"
+    LINK="hysteria2://${SB_HY2_PASS}@${UHOST}:${PORT}?insecure=${SB_CERT_INSECURE}&allowInsecure=${SB_CERT_INSECURE}&allow_insecure=${SB_CERT_INSECURE}&skip-cert-verify=${SB_CERT_INSECURE}&sni=${SB_SNI_HOST}&alpn=h3${HOP_PARAM}#Hysteria2${SUFFIX}"
     echo -e "${GREEN}${LINK}${PLAIN}"
   fi
 
   if [[ "${SB_ENABLE_TUIC:-0}" == "1" ]]; then
     PORT="${SB_TUIC_P4}"
     [[ "$LABEL" == "IPv6" ]] && PORT="${SB_TUIC_P6}"
-    LINK="tuic://${SB_TUIC_UUID}:${SB_TUIC_PASS}@${UHOST}:${PORT}?congestion_control=bbr&alpn=h3&sni=${SB_SNI_HOST}&allow_insecure=${SB_CERT_INSECURE}&insecure=${SB_CERT_INSECURE}&version=5&udp_relay_mode=native#TUIC${SUFFIX}"
+    LINK="tuic://${SB_TUIC_UUID}:${SB_TUIC_PASS}@${UHOST}:${PORT}?congestion_control=bbr&alpn=h3&sni=${SB_SNI_HOST}&allow_insecure=${SB_CERT_INSECURE}&allowInsecure=${SB_CERT_INSECURE}&insecure=${SB_CERT_INSECURE}&skip-cert-verify=${SB_CERT_INSECURE}&version=5&udp_relay_mode=native#TUIC${SUFFIX}"
     echo -e "${GREEN}${LINK}${PLAIN}"
   fi
 done
@@ -1873,7 +1900,8 @@ if [[ "$ENABLE_TUIC" -eq 1 ]]; then
           "listen_port": $p4,
           "users": [{ "uuid": $uuid, "password": $pwd }],
           "congestion_control": "bbr",
-          "zero_rtt_handshake": true,
+          "auth_timeout": "10s",
+          "zero_rtt_handshake": false,
           "tls": { "enabled": true, "alpn": ["h3"], "certificate_path": $cert, "key_path": $key }
         },
         {
@@ -1883,7 +1911,8 @@ if [[ "$ENABLE_TUIC" -eq 1 ]]; then
           "listen_port": $p6,
           "users": [{ "uuid": $uuid, "password": $pwd }],
           "congestion_control": "bbr",
-          "zero_rtt_handshake": true,
+          "auth_timeout": "10s",
+          "zero_rtt_handshake": false,
           "tls": { "enabled": true, "alpn": ["h3"], "certificate_path": $cert, "key_path": $key }
         }
       ]
@@ -1896,7 +1925,8 @@ if [[ "$ENABLE_TUIC" -eq 1 ]]; then
           "listen_port": $p4,
           "users": [{ "uuid": $uuid, "password": $pwd }],
           "congestion_control": "bbr",
-          "zero_rtt_handshake": true,
+          "auth_timeout": "10s",
+          "zero_rtt_handshake": false,
           "tls": { "enabled": true, "alpn": ["h3"], "certificate_path": $cert, "key_path": $key }
         }
       ]
