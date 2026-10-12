@@ -656,7 +656,15 @@ push_to_manager() {
   fi
 
   # 3. 输入主节点订阅源名称 (Reality / Hy2 / TUIC 三合一)
-  DEF_TAG_M="${SAVED_TAG_M:-SingBox-VPS}"
+  DEF_TAG_M="${SAVED_TAG_M:-}"
+  if [[ -z "$DEF_TAG_M" ]]; then
+    HOST_NAME="$(hostname 2>/dev/null || echo "")"
+    if [[ -n "$HOST_NAME" && "$HOST_NAME" != "localhost" ]]; then
+      DEF_TAG_M="${HOST_NAME}"
+    else
+      DEF_TAG_M="SingBox-VPS"
+    fi
+  fi
   read -r -p "请输入主节点订阅源名称 (Reality/Hy2/TUIC 三合一) [默认: ${DEF_TAG_M}]: " P_TAG_M
   TAG_MAIN="${P_TAG_M:-$DEF_TAG_M}"
 
@@ -1998,12 +2006,13 @@ echo -e ">>> 随时输入 ${GREEN}sb${PLAIN} 查看所有节点链接与 Mihomo 
 echo -e "${BLUE}==============================================================${PLAIN}"
 echo -e "${BLUE}        🚀 自动推送到节点管理平台 (cf-node-manager-plus)       ${PLAIN}"
 echo -e "${BLUE}==============================================================${PLAIN}"
-read -r -p "是否将本次生成的节点自动推送到节点管理面板? [y/N]: " DO_PUSH
+read -r -p "是否将本次生成的节点自动推送到节点管理面板? [Y/n] (默认: Y): " DO_PUSH
+DO_PUSH="${DO_PUSH:-Y}"
 case "$DO_PUSH" in
-  [yY]|[yY][eE][sS])
-    "$SHORTCUT_BIN" push
+  [nN]|[nN][oO])
+    echo -e "已跳过自动推送。后续可随时输入 ${GREEN}sb push${PLAIN} 推送节点至管理平台！\n"
     ;;
   *)
-    echo -e "已跳过自动推送。后续可随时输入 ${GREEN}sb push${PLAIN} 推送节点至管理平台！\n"
+    "$SHORTCUT_BIN" push
     ;;
 esac
