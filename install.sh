@@ -595,10 +595,10 @@ fw_allow_ports(){
 
   if command -v iptables >/dev/null 2>&1; then
     for p in $tcp_ports; do
-      iptables -C INPUT -p tcp --dport "$p" -j ACCEPT >/dev/null 2>&1 || iptables -A INPUT -p tcp --dport "$p" -j ACCEPT >/dev/null 2>&1 || true
+      iptables -C INPUT -p tcp --dport "$p" -j ACCEPT >/dev/null 2>&1 || iptables -I INPUT 1 -p tcp --dport "$p" -j ACCEPT >/dev/null 2>&1 || true
     done
     for p in $udp_ports; do
-      iptables -C INPUT -p udp --dport "$p" -j ACCEPT >/dev/null 2>&1 || iptables -A INPUT -p udp --dport "$p" -j ACCEPT >/dev/null 2>&1 || true
+      iptables -C INPUT -p udp --dport "$p" -j ACCEPT >/dev/null 2>&1 || iptables -I INPUT 1 -p udp --dport "$p" -j ACCEPT >/dev/null 2>&1 || true
     done
     if [[ -n "$udp_range" ]]; then
       local r_ipt="${udp_range//-/:}"
@@ -2102,7 +2102,7 @@ if [[ "$ENABLE_TUIC" -eq 1 ]]; then
           "users": [{ "uuid": $uuid, "password": $pwd }],
           "congestion_control": "bbr",
           "auth_timeout": "10s",
-          "zero_rtt_handshake": false,
+          "zero_rtt_handshake": true,
           "tls": { "enabled": true, "alpn": ["h3"], "certificate_path": $cert, "key_path": $key }
         },
         {
@@ -2113,7 +2113,7 @@ if [[ "$ENABLE_TUIC" -eq 1 ]]; then
           "users": [{ "uuid": $uuid, "password": $pwd }],
           "congestion_control": "bbr",
           "auth_timeout": "10s",
-          "zero_rtt_handshake": false,
+          "zero_rtt_handshake": true,
           "tls": { "enabled": true, "alpn": ["h3"], "certificate_path": $cert, "key_path": $key }
         }
       ]
@@ -2127,7 +2127,7 @@ if [[ "$ENABLE_TUIC" -eq 1 ]]; then
           "users": [{ "uuid": $uuid, "password": $pwd }],
           "congestion_control": "bbr",
           "auth_timeout": "10s",
-          "zero_rtt_handshake": false,
+          "zero_rtt_handshake": true,
           "tls": { "enabled": true, "alpn": ["h3"], "certificate_path": $cert, "key_path": $key }
         }
       ]
@@ -2518,6 +2518,8 @@ command="${INSTALL_PATH}"
 command_args="run -c ${CONF_DIR}/config.json"
 command_background=true
 pidfile="/run/sing-box.pid"
+output_log="/var/log/sing-box.log"
+error_log="/var/log/sing-box.err"
 rc_ulimit="-n 1048576"
 start_pre() { /usr/local/bin/sb-hop.sh >/dev/null 2>&1 || true; }
 depend() { need net; }
