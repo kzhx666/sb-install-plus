@@ -2521,7 +2521,43 @@ pidfile="/run/sing-box.pid"
 output_log="/var/log/sing-box.log"
 error_log="/var/log/sing-box.err"
 rc_ulimit="-n 1048576"
-start_pre() { /usr/local/bin/sb-hop.sh >/dev/null 2>&1 || true; }
+
+start_pre() {
+  /usr/local/bin/sb-hop.sh >/dev/null 2>&1 || true
+  if [ -f "\$pidfile" ]; then
+    oldpid=\$(cat "\$pidfile" 2>/dev/null)
+    if [ -n "\$oldpid" ] && ! kill -0 "\$oldpid" 2>/dev/null; then
+      rm -f "\$pidfile"
+    fi
+  fi
+}
+
+stop() {
+  ebegin "Stopping sing-box"
+  if [ -f "\$pidfile" ]; then
+    start-stop-daemon --stop --pidfile "\$pidfile" --retry 5 2>/dev/null || true
+  fi
+  pkill -f "${INSTALL_PATH}" 2>/dev/null || true
+  rm -f "\$pidfile"
+  eend 0
+}
+
+status() {
+  if [ -f "\$pidfile" ]; then
+    pid=\$(cat "\$pidfile" 2>/dev/null)
+    if [ -n "\$pid" ] && kill -0 "\$pid" 2>/dev/null; then
+      einfo "status: started"
+      return 0
+    fi
+  fi
+  if pgrep -f "${INSTALL_PATH} run" >/dev/null 2>&1; then
+    einfo "status: started"
+    return 0
+  fi
+  einfo "status: stopped"
+  return 3
+}
+
 depend() { need net; }
 EOF
   chmod +x /etc/init.d/sing-box
