@@ -264,9 +264,10 @@ install_xray_argo(){
     rm -f "$tmp_zip" 2>/dev/null || true
 
     info "正在下载 Xray-core (${arch_zip})..."
-    curl -fsSL --connect-timeout 8 -m 60 "$xray_url" -o "$tmp_zip" 2>/dev/null || \
-    curl -fsSL --connect-timeout 8 -m 60 "https://mirror.ghproxy.com/$xray_url" -o "$tmp_zip" 2>/dev/null || \
+    curl -fsSL --connect-timeout 8 -m 60 "https://hub.gitmirror.com/$xray_url" -o "$tmp_zip" 2>/dev/null || \
     curl -fsSL --connect-timeout 8 -m 60 "https://ghproxy.net/$xray_url" -o "$tmp_zip" 2>/dev/null || \
+    curl -fsSL --connect-timeout 8 -m 60 "https://gh.ddlc.top/$xray_url" -o "$tmp_zip" 2>/dev/null || \
+    curl -fsSL --connect-timeout 8 -m 60 "$xray_url" -o "$tmp_zip" 2>/dev/null || \
     wget -q -T 30 -O "$tmp_zip" "$xray_url" || true
 
     if [[ -s "$tmp_zip" ]]; then
@@ -322,7 +323,7 @@ install_xray_argo(){
         "network": "xhttp",
         "xhttpSettings": {
           "path": "${path}",
-          "mode": "packet-up"
+          "mode": "auto"
         }
       }
     }
@@ -847,14 +848,14 @@ for i in "${!HOSTS[@]}"; do
     [[ "$LABEL" == "IPv6" ]] && PORT="${SB_HY2_P6}"
     HOP_PARAM=""
     [[ -n "${SB_HOP_RANGE:-}" ]] && HOP_PARAM="&ports=${SB_HOP_RANGE}&mport=${SB_HOP_RANGE}"
-    LINK="hysteria2://${SB_HY2_PASS}@${UHOST}:${PORT}?insecure=${SB_CERT_INSECURE}&allowInsecure=${SB_CERT_INSECURE}&allow_insecure=${SB_CERT_INSECURE}&skip-cert-verify=${SB_CERT_INSECURE}&sni=${SB_SNI_HOST}&alpn=h3${HOP_PARAM}#Hysteria2${SUFFIX}"
+    LINK="hysteria2://${SB_HY2_PASS}@${UHOST}:${PORT}?insecure=1&allowInsecure=1&allow_insecure=1&skip-cert-verify=1&sni=${SB_SNI_HOST}&alpn=h3${HOP_PARAM}#Hysteria2${SUFFIX}"
     MAIN_NODES_LIST+=("$LINK")
   fi
 
   if [[ "${SB_ENABLE_TUIC:-0}" == "1" ]]; then
     PORT="${SB_TUIC_P4}"
     [[ "$LABEL" == "IPv6" ]] && PORT="${SB_TUIC_P6}"
-    LINK="tuic://${SB_TUIC_UUID}:${SB_TUIC_PASS}@${UHOST}:${PORT}?congestion_control=bbr&alpn=h3&sni=${SB_SNI_HOST}&allow_insecure=${SB_CERT_INSECURE}&allowInsecure=${SB_CERT_INSECURE}&insecure=${SB_CERT_INSECURE}&skip-cert-verify=${SB_CERT_INSECURE}&version=5&udp_relay_mode=native#TUIC${SUFFIX}"
+    LINK="tuic://${SB_TUIC_UUID}:${SB_TUIC_PASS}@${UHOST}:${PORT}?congestion_control=bbr&alpn=h3&sni=${SB_SNI_HOST}&allow_insecure=1&allowInsecure=1&insecure=1&skip-cert-verify=1&version=5&udp_relay_mode=native#TUIC${SUFFIX}"
     MAIN_NODES_LIST+=("$LINK")
   fi
 done
@@ -864,7 +865,7 @@ if [[ -n "${SB_ARGO_DOMAIN:-}" ]]; then
   if [[ "${SB_ARGO_TRANSPORT:-xhttp}" == "ws" ]]; then
     ARGO_NODE_LINK="vless://${SB_UUID}@${SB_ARGO_DOMAIN}:443?encryption=none&security=tls&sni=${SB_ARGO_DOMAIN}&type=ws&host=${SB_ARGO_DOMAIN}&path=%2Fargo#Argo"
   else
-    ARGO_NODE_LINK="vless://${SB_UUID}@${SB_ARGO_DOMAIN}:443?encryption=none&security=tls&sni=${SB_ARGO_DOMAIN}&type=xhttp&host=${SB_ARGO_DOMAIN}&path=%2Fargo&mode=packet-up&alpn=h3#Argo"
+    ARGO_NODE_LINK="vless://${SB_UUID}@${SB_ARGO_DOMAIN}:443?encryption=none&security=tls&sni=${SB_ARGO_DOMAIN}&type=xhttp&host=${SB_ARGO_DOMAIN}&path=%2Fargo&mode=auto#Argo"
   fi
 fi
 
@@ -1083,14 +1084,14 @@ for i in "${!HOSTS[@]}"; do
     [[ "$LABEL" == "IPv6" ]] && PORT="${SB_HY2_P6}"
     HOP_PARAM=""
     [[ -n "${SB_HOP_RANGE:-}" ]] && HOP_PARAM="&ports=${SB_HOP_RANGE}&mport=${SB_HOP_RANGE}"
-    LINK="hysteria2://${SB_HY2_PASS}@${UHOST}:${PORT}?insecure=${SB_CERT_INSECURE}&allowInsecure=${SB_CERT_INSECURE}&allow_insecure=${SB_CERT_INSECURE}&skip-cert-verify=${SB_CERT_INSECURE}&sni=${SB_SNI_HOST}&alpn=h3${HOP_PARAM}#Hysteria2${SUFFIX}"
+    LINK="hysteria2://${SB_HY2_PASS}@${UHOST}:${PORT}?insecure=1&allowInsecure=1&allow_insecure=1&skip-cert-verify=1&sni=${SB_SNI_HOST}&alpn=h3${HOP_PARAM}#Hysteria2${SUFFIX}"
     echo -e "${GREEN}${LINK}${PLAIN}"
   fi
 
   if [[ "${SB_ENABLE_TUIC:-0}" == "1" ]]; then
     PORT="${SB_TUIC_P4}"
     [[ "$LABEL" == "IPv6" ]] && PORT="${SB_TUIC_P6}"
-    LINK="tuic://${SB_TUIC_UUID}:${SB_TUIC_PASS}@${UHOST}:${PORT}?congestion_control=bbr&alpn=h3&sni=${SB_SNI_HOST}&allow_insecure=${SB_CERT_INSECURE}&allowInsecure=${SB_CERT_INSECURE}&insecure=${SB_CERT_INSECURE}&skip-cert-verify=${SB_CERT_INSECURE}&version=5&udp_relay_mode=native#TUIC${SUFFIX}"
+    LINK="tuic://${SB_TUIC_UUID}:${SB_TUIC_PASS}@${UHOST}:${PORT}?congestion_control=bbr&alpn=h3&sni=${SB_SNI_HOST}&allow_insecure=1&allowInsecure=1&insecure=1&skip-cert-verify=1&version=5&udp_relay_mode=native#TUIC${SUFFIX}"
     echo -e "${GREEN}${LINK}${PLAIN}"
   fi
 done
@@ -1100,7 +1101,7 @@ if [[ -n "${SB_ARGO_DOMAIN:-}" ]]; then
   if [[ "${SB_ARGO_TRANSPORT:-xhttp}" == "ws" ]]; then
     LINK_ARGO="vless://${SB_UUID}@${SB_ARGO_DOMAIN}:443?encryption=none&security=tls&sni=${SB_ARGO_DOMAIN}&type=ws&host=${SB_ARGO_DOMAIN}&path=%2Fargo#Argo"
   else
-    LINK_ARGO="vless://${SB_UUID}@${SB_ARGO_DOMAIN}:443?encryption=none&security=tls&sni=${SB_ARGO_DOMAIN}&type=xhttp&host=${SB_ARGO_DOMAIN}&path=%2Fargo&mode=packet-up&alpn=h3#Argo"
+    LINK_ARGO="vless://${SB_UUID}@${SB_ARGO_DOMAIN}:443?encryption=none&security=tls&sni=${SB_ARGO_DOMAIN}&type=xhttp&host=${SB_ARGO_DOMAIN}&path=%2Fargo&mode=auto#Argo"
   fi
   echo -e "${GREEN}${LINK_ARGO}${PLAIN}"
 fi
@@ -1146,7 +1147,7 @@ YAML
     password: "${SB_HY2_PASS}"
     sni: "${SB_SNI_HOST}"
     alpn: [h3]
-    skip-cert-verify: $([[ "$SB_CERT_INSECURE" == "1" ]] && echo "true" || echo "false")
+    skip-cert-verify: true
 $([[ -n "${SB_HOP_RANGE:-}" ]] && echo "    ports: \"${SB_HOP_RANGE}\"")
 YAML
     fi
@@ -1164,7 +1165,7 @@ YAML
     version: 5
     alpn: [h3]
     sni: "${SB_SNI_HOST}"
-    skip-cert-verify: $([[ "$SB_CERT_INSECURE" == "1" ]] && echo "true" || echo "false")
+    skip-cert-verify: true
     congestion-controller: bbr
     reduce-rtt: true
 YAML
@@ -1201,11 +1202,12 @@ YAML
     servername: "${SB_ARGO_DOMAIN}"
     network: xhttp
     alpn:
-      - h3
+      - h2
+      - http/1.1
     xhttp-opts:
       path: /argo
       host: "${SB_ARGO_DOMAIN}"
-      mode: packet-up
+      mode: auto
 YAML
     fi
   fi
