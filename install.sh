@@ -236,6 +236,150 @@ _arch_norm(){
   esac
 }
 
+_xray_arch_zip(){
+  local a="$(_arch_norm)"
+  case "$a" in
+    amd64) echo "Xray-linux-64.zip" ;;
+    arm64) echo "Xray-linux-arm64-v8a.zip" ;;
+    armv7) echo "Xray-linux-arm32-v7a.zip" ;;
+    386) echo "Xray-linux-32.zip" ;;
+    *) echo "Xray-linux-64.zip" ;;
+  esac
+}
+
+# 部署/更新 Xray-core xHTTP 伴侣程序 (用于 OpenClash / HTTP/3 QUIC 优选)
+install_xray_argo(){
+  local uuid="$1"
+  local port="${2:-10086}"
+  local path="${3:-/argo}"
+
+  info "正在部署/校验 Xray-core xHTTP 伴侣程序 (用于 OpenClash / HTTP/3 优选)..."
+  local xray_bin="/usr/local/bin/xray-argo"
+  local xray_cfg="$CONF_DIR/xray-argo.json"
+
+  if ! "$xray_bin" version >/dev/null 2>&1; then
+    local arch_zip="$(_xray_arch_zip)"
+    local xray_url="https://github.com/XTLS/Xray-core/releases/latest/download/${arch_zip}"
+    local tmp_zip="/tmp/xray_argo.zip"
+    rm -f "$tmp_zip" 2>/dev/null || true
+
+    info "正在下载 Xray-core (${arch_zip})..."
+    curl -fsSL --connect-timeout 8 -m 60 "$xray_url" -o "$tmp_zip" 2>/dev/null || \
+    curl -fsSL --connect-timeout 8 -m 60 "https://mirror.ghproxy.com/$xray_url" -o "$tmp_zip" 2>/dev/null || \
+    curl -fsSL --connect-timeout 8 -m 60 "https://ghproxy.net/$xray_url" -o "$tmp_zip" 2>/dev/null || \
+    wget -q -T 30 -O "$tmp_zip" "$xray_url" || true
+
+    if [[ -s "$tmp_zip" ]]; then
+      local tmp_extract="/tmp/xray_extract"
+      rm -rf "$tmp_extract" && mkdir -p "$tmp_extract"
+      if command -v unzip >/dev/null 2>&1; then
+        unzip -q -o "$tmp_zip" -d "$tmp_extract" || true
+      elif command -v python3 >/dev/null 2>&1; then
+        python3 -m zipfile -e "$tmp_zip" "$tmp_extract" || true
+      elif command -v python >/dev/null 2>&1; then
+        python -m zipfile -e "$tmp_zip" "$tmp_extract" || true
+      else
+        install_pkgs "unzip"
+        unzip -q -o "$tmp_zip" -d "$tmp_extract" || true
+      fi
+
+      if [[ -f "$tmp_extract/xray" ]]; then
+        mv -f "$tmp_extract/xray" "$xray_bin"
+        chmod +x "$xray_bin"
+      fi
+      rm -rf "$tmp_extract" "$tmp_zip"
+    fi
+  fi
+
+  if ! "$xray_bin" version >/dev/null 2>&1; then
+    warn "Xray xHTTP 伴侣程序下载失败，将无法承接 xHTTP 流量！"
+    return 1
+  fi
+
+  ok "Xray-core 校验通过 ($("$xray_bin" version 2>/dev/null | head -n1))"
+
+  cat > "$xray_cfg" <<EOF
+{
+  "log": {
+    "loglevel": "warning"
+  },
+  "inbounds": [
+    {
+      "tag": "vless-xhttp-in",
+      "listen": "127.0.0.1",
+      "port": ${port},
+      "protocol": "vless",
+      "settings": {
+        "clients": [
+          {
+            "id": "${uuid}",
+            "level": 0
+          }
+        ],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "xhttp",
+        "xhttpSettings": {
+          "path": "${path}",
+          "mode": "packet-up"
+        }
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "protocol": "freedom",
+      "tag": "direct"
+    }
+  ]
+}
+EOF
+  chmod 600 "$xray_cfg"
+
+  if has_systemd; then
+    cat > /etc/systemd/system/xray-argo.service <<EOF
+[Unit]
+Description=Xray Argo Service (xHTTP Companion)
+After=network.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=${xray_bin} run -c ${xray_cfg}
+Restart=on-failure
+RestartSec=5s
+KillMode=mixed
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl enable xray-argo >/dev/null 2>&1 || true
+    systemctl restart xray-argo >/dev/null 2>&1 || true
+    sleep 1
+    if systemctl is-active xray-argo >/dev/null 2>&1 || pgrep -f xray-argo >/dev/null 2>&1; then
+      ok "Xray xHTTP 伴侣守护进程已启动运行 (监听 127.0.0.1:${port})！"
+    else
+      warn "Xray xHTTP 伴侣守护进程启动异常，状态如下:"
+      systemctl status xray-argo --no-pager 2>&1 | head -n 10 || true
+    fi
+  elif has_openrc; then
+    cat > /etc/init.d/xray-argo <<EOF
+#!/sbin/openrc-run
+name="xray-argo"
+command="${xray_bin}"
+command_args="run -c ${xray_cfg}"
+command_background=true
+pidfile="/run/xray-argo.pid"
+depend() { need net; }
+EOF
+    chmod +x /etc/init.d/xray-argo
+    rc-update add xray-argo default >/dev/null 2>&1 || true
+    rc-service xray-argo restart >/dev/null 2>&1 || true
+  fi
+}
+
 # ==============================================================================
 # [深度提速] Linux 网络协议栈与 BBR / UDP 巨型缓冲调优
 # ==============================================================================
@@ -548,19 +692,28 @@ do_uninstall(){
 
   service_disable
   
-  # 停止并卸载 Cloudflare Argo tunnel 守护进程
+  # 停止并卸载 Cloudflare Argo tunnel 守护进程与 Xray xHTTP 伴侣
   if command -v cloudflared >/dev/null 2>&1; then
     cloudflared service uninstall >/dev/null 2>&1 || true
   fi
   if has_systemd; then
     systemctl stop cloudflared >/dev/null 2>&1 || true
     systemctl disable cloudflared >/dev/null 2>&1 || true
+    systemctl stop xray-argo >/dev/null 2>&1 || true
+    systemctl disable xray-argo >/dev/null 2>&1 || true
+    rm -f /etc/systemd/system/xray-argo.service >/dev/null 2>&1 || true
   elif has_openrc; then
     rc-service cloudflared stop >/dev/null 2>&1 || true
     rc-update del cloudflared default >/dev/null 2>&1 || true
+    rc-service xray-argo stop >/dev/null 2>&1 || true
+    rc-update del xray-argo default >/dev/null 2>&1 || true
+    rm -f /etc/init.d/xray-argo >/dev/null 2>&1 || true
   fi
   pkill -9 -f sing-box >/dev/null 2>&1 || true
   pkill -9 -f cloudflared >/dev/null 2>&1 || true
+  pkill -9 -f xray-argo >/dev/null 2>&1 || true
+  rm -f /usr/local/bin/xray-argo >/dev/null 2>&1 || true
+  rm -f "$CONF_DIR/xray-argo.json" >/dev/null 2>&1 || true
 
   # 清理端口跳跃 iptables 规则
   if command -v iptables >/dev/null 2>&1; then
@@ -708,7 +861,11 @@ done
 
 ARGO_NODE_LINK=""
 if [[ -n "${SB_ARGO_DOMAIN:-}" ]]; then
-  ARGO_NODE_LINK="vless://${SB_UUID}@${SB_ARGO_DOMAIN}:443?encryption=none&security=tls&sni=${SB_ARGO_DOMAIN}&type=ws&host=${SB_ARGO_DOMAIN}&path=%2Fargo#Argo"
+  if [[ "${SB_ARGO_TRANSPORT:-xhttp}" == "ws" ]]; then
+    ARGO_NODE_LINK="vless://${SB_UUID}@${SB_ARGO_DOMAIN}:443?encryption=none&security=tls&sni=${SB_ARGO_DOMAIN}&type=ws&host=${SB_ARGO_DOMAIN}&path=%2Fargo#Argo"
+  else
+    ARGO_NODE_LINK="vless://${SB_UUID}@${SB_ARGO_DOMAIN}:443?encryption=none&security=tls&sni=${SB_ARGO_DOMAIN}&type=xhttp&host=${SB_ARGO_DOMAIN}&path=%2Fargo&mode=packet-up&alpn=h3#Argo"
+  fi
 fi
 
 # 独立函数：推送到节点管理平台 (cf-node-manager-plus)
@@ -940,7 +1097,11 @@ done
 
 # Argo 隧道节点放最后
 if [[ -n "${SB_ARGO_DOMAIN:-}" ]]; then
-  LINK_ARGO="vless://${SB_UUID}@${SB_ARGO_DOMAIN}:443?encryption=none&security=tls&sni=${SB_ARGO_DOMAIN}&type=ws&host=${SB_ARGO_DOMAIN}&path=%2Fargo#Argo"
+  if [[ "${SB_ARGO_TRANSPORT:-xhttp}" == "ws" ]]; then
+    LINK_ARGO="vless://${SB_UUID}@${SB_ARGO_DOMAIN}:443?encryption=none&security=tls&sni=${SB_ARGO_DOMAIN}&type=ws&host=${SB_ARGO_DOMAIN}&path=%2Fargo#Argo"
+  else
+    LINK_ARGO="vless://${SB_UUID}@${SB_ARGO_DOMAIN}:443?encryption=none&security=tls&sni=${SB_ARGO_DOMAIN}&type=xhttp&host=${SB_ARGO_DOMAIN}&path=%2Fargo&mode=packet-up&alpn=h3#Argo"
+  fi
   echo -e "${GREEN}${LINK_ARGO}${PLAIN}"
 fi
 
@@ -1010,9 +1171,10 @@ YAML
     fi
   done
 
-  # Argo 放在最后
+  # Argo 放在最后 (支持 xHTTP 与 WS)
   if [[ -n "${SB_ARGO_DOMAIN:-}" ]]; then
-    cat <<YAML
+    if [[ "${SB_ARGO_TRANSPORT:-xhttp}" == "ws" ]]; then
+      cat <<YAML
   - name: "Argo"
     type: vless
     server: "${SB_ARGO_DOMAIN}"
@@ -1027,6 +1189,25 @@ YAML
       headers:
         Host: "${SB_ARGO_DOMAIN}"
 YAML
+    else
+      cat <<YAML
+  - name: "Argo"
+    type: vless
+    server: "${SB_ARGO_DOMAIN}"
+    port: 443
+    uuid: "${SB_UUID}"
+    udp: true
+    tls: true
+    servername: "${SB_ARGO_DOMAIN}"
+    network: xhttp
+    alpn:
+      - h3
+    xhttp-opts:
+      path: /argo
+      host: "${SB_ARGO_DOMAIN}"
+      mode: packet-up
+YAML
+    fi
   fi
 } > "$MIHOMO_FILE"
 
@@ -1187,6 +1368,7 @@ fi
 _EXT_AUTO_INSTALL="${AUTO_INSTALL:-0}"
 _EXT_ARGO_TOKEN="${SB_ARGO_TOKEN:-${ARGO_TOKEN:-}}"
 _EXT_ARGO_DOMAIN="${SB_ARGO_DOMAIN:-${ARGO_DOMAIN:-}}"
+_EXT_ARGO_TRANSPORT="${SB_ARGO_TRANSPORT:-${ARGO_TRANSPORT:-}}"
 _EXT_CF_TOKEN="${SB_CF_TOKEN:-${CF_TOKEN:-}}"
 _EXT_ACME_MODE="${SB_ACME_MODE:-${ACME_MODE:-}}"
 _EXT_REALITY_SNI="${REALITY_SNI:-}"
@@ -1207,6 +1389,7 @@ fi
 if [[ "${_EXT_AUTO_INSTALL}" -eq 1 || "${1:-}" == "--auto" || "${1:-}" == "auto" ]]; then
   [[ -n "$_EXT_ARGO_TOKEN" ]] && SB_ARGO_TOKEN="$_EXT_ARGO_TOKEN"
   [[ -n "$_EXT_ARGO_DOMAIN" ]] && SB_ARGO_DOMAIN="$_EXT_ARGO_DOMAIN"
+  [[ -n "$_EXT_ARGO_TRANSPORT" ]] && SB_ARGO_TRANSPORT="$_EXT_ARGO_TRANSPORT"
   [[ -n "$_EXT_CF_TOKEN" ]] && SB_CF_TOKEN="$_EXT_CF_TOKEN"
   [[ -n "$_EXT_ACME_MODE" ]] && SB_ACME_MODE="$_EXT_ACME_MODE"
   [[ -n "$_EXT_REALITY_SNI" ]] && REALITY_SNI="$_EXT_REALITY_SNI"
@@ -1722,8 +1905,24 @@ if [[ -n "${ARGO_TOKEN:-}" ]]; then
 fi
 
 if [[ -n "${ARGO_TOKEN:-}" && -n "${ARGO_DOMAIN:-}" ]]; then
-  ok "Argo 隧道已配置: 域名 ${ARGO_DOMAIN}"
+  ARGO_TRANSPORT="${_EXT_ARGO_TRANSPORT:-${SB_ARGO_TRANSPORT:-${ARGO_TRANSPORT:-}}}"
+  if [[ -z "$ARGO_TRANSPORT" ]]; then
+    if [[ "${AUTO_INSTALL:-0}" -eq 1 ]]; then
+      ARGO_TRANSPORT="xhttp"
+    else
+      echo -e "\n请选择 Cloudflare Argo 穿透传输协议:"
+      echo -e "  ${GREEN}1)${PLAIN} xHTTP (H3/UDP) [推荐 OpenClash / 现代客户端极速优选]"
+      echo -e "  ${GREEN}2)${PLAIN} WebSocket (经典兼容模式)"
+      read -r -p "请输入选项 [1-2] (默认: 1): " INPUT_ARGO_TRANS || true
+      case "${INPUT_ARGO_TRANS:-1}" in
+        2|[Ww][Ss]) ARGO_TRANSPORT="ws" ;;
+        *) ARGO_TRANSPORT="xhttp" ;;
+      esac
+    fi
+  fi
+  ok "Argo 隧道已配置: 域名 ${ARGO_DOMAIN} | 传输协议 [${GREEN}${ARGO_TRANSPORT}${PLAIN}]"
 else
+  ARGO_TRANSPORT=""
   info "已跳过 Argo 隧道配置"
 fi
 
@@ -2000,26 +2199,28 @@ FINAL_OUT="direct"
 [[ "$OUT_MODE" == "both" ]] && FINAL_OUT="direct-v4"
 
 if [[ -n "${ARGO_TOKEN:-}" && -n "${ARGO_DOMAIN:-}" ]]; then
-  INBOUNDS_JSON="$(echo "$INBOUNDS_JSON" | jq --arg uuid "$UUID" --argjson port "$ARGO_PORT" '
-    . + [
-      {
-        "type": "vless",
-        "tag": "vless-argo-in",
-        "listen": "127.0.0.1",
-        "listen_port": $port,
-        "users": [{ "uuid": $uuid }],
-        "transport": {
-          "type": "ws",
-          "path": "/argo"
+  if [[ "${ARGO_TRANSPORT:-xhttp}" == "ws" ]]; then
+    INBOUNDS_JSON="$(echo "$INBOUNDS_JSON" | jq --arg uuid "$UUID" --argjson port "$ARGO_PORT" '
+      . + [
+        {
+          "type": "vless",
+          "tag": "vless-argo-in",
+          "listen": "127.0.0.1",
+          "listen_port": $port,
+          "users": [{ "uuid": $uuid }],
+          "transport": {
+            "type": "ws",
+            "path": "/argo"
+          }
         }
-      }
-    ]
-  ')"
-  RULES_JSON="$(echo "$RULES_JSON" | jq --arg final "$FINAL_OUT" '
-    . + [
-      { "inbound": ["vless-argo-in"], "outbound": $final }
-    ]
-  ')"
+      ]
+    ')"
+    RULES_JSON="$(echo "$RULES_JSON" | jq --arg final "$FINAL_OUT" '
+      . + [
+        { "inbound": ["vless-argo-in"], "outbound": $final }
+      ]
+    ')"
+  fi
 fi
 
 # 整合最终配置 (带极速本地内存 DNS 缓存)
@@ -2144,10 +2345,24 @@ if [[ -n "$HOP_RANGE" ]]; then
   /usr/local/bin/sb-hop.sh >/dev/null 2>&1 || true
 fi
 
-# 配置与启动 Cloudflare Argo 隧道 (cloudflared)
+# 配置与启动 Cloudflare Argo 隧道 (cloudflared + xHTTP/WS 传输)
 if [[ -n "${ARGO_TOKEN:-}" && -n "${ARGO_DOMAIN:-}" ]]; then
   info "正在配置 Cloudflare Argo 隧道 (cloudflared)..."
   local_arch="$(_arch_norm)"
+
+  # 若选择 xHTTP 传输，启动 Xray-core 伴侣守护进程
+  if [[ "${ARGO_TRANSPORT:-xhttp}" == "xhttp" ]]; then
+    install_xray_argo "$UUID" "$ARGO_PORT" "/argo"
+  else
+    if has_systemd; then
+      systemctl stop xray-argo >/dev/null 2>&1 || true
+      systemctl disable xray-argo >/dev/null 2>&1 || true
+    elif has_openrc; then
+      rc-service xray-argo stop >/dev/null 2>&1 || true
+      rc-update del xray-argo default >/dev/null 2>&1 || true
+    fi
+    pkill -9 -f xray-argo >/dev/null 2>&1 || true
+  fi
 
   # 校验当前已有二进制是否完整可用，若损坏则强制清理重新下载
   if ! /usr/local/bin/cloudflared --version >/dev/null 2>&1; then
@@ -2217,6 +2432,21 @@ EOF
       fi
     fi
   fi
+else
+  # 未配置或已关闭 Argo 隧道，停止相关后台进程
+  if has_systemd; then
+    systemctl stop cloudflared >/dev/null 2>&1 || true
+    systemctl disable cloudflared >/dev/null 2>&1 || true
+    systemctl stop xray-argo >/dev/null 2>&1 || true
+    systemctl disable xray-argo >/dev/null 2>&1 || true
+  elif has_openrc; then
+    rc-service cloudflared stop >/dev/null 2>&1 || true
+    rc-update del cloudflared default >/dev/null 2>&1 || true
+    rc-service xray-argo stop >/dev/null 2>&1 || true
+    rc-update del xray-argo default >/dev/null 2>&1 || true
+  fi
+  pkill -9 -f cloudflared >/dev/null 2>&1 || true
+  pkill -9 -f xray-argo >/dev/null 2>&1 || true
 fi
 
 # 保存状态文件
@@ -2251,6 +2481,7 @@ SB_CF_TOKEN="${CF_TOKEN:-}"
 SB_ARGO_TOKEN="${ARGO_TOKEN:-}"
 SB_ARGO_DOMAIN="${ARGO_DOMAIN:-}"
 SB_ARGO_PORT="${ARGO_PORT:-10086}"
+SB_ARGO_TRANSPORT="${ARGO_TRANSPORT:-xhttp}"
 EOF
 chmod 600 "$STATE_FILE"
 
