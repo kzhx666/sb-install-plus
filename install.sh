@@ -2534,7 +2534,7 @@ H4 = $AWG_H4
 
 [Peer]
 PublicKey = $AWG_SERVER_PUB
-Endpoint = ${DOMAIN_NAME:-$LOCAL_IPV4}:${P_AWG_V4}
+Endpoint = ${DOMAIN_NAME:-${IPV4:-$LOCAL_IPV4}}:${P_AWG_V4}
 AllowedIPs = 0.0.0.0/0, ::/0
 PersistentKeepalive = 25
 EOF
