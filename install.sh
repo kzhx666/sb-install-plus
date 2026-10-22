@@ -843,19 +843,27 @@ for i in "${!HOSTS[@]}"; do
     MAIN_NODES_LIST+=("$LINK")
   fi
 
+  # 若配置了合法自有域名证书 (SB_CERT_INSECURE == 0)，则直接以域名作为节点地址，且无需跳过证书验证
+  TLS_HOST="$UHOST"
+  INSECURE_PARAM="&insecure=1&allowInsecure=1&allow_insecure=1&skip-cert-verify=1"
+  if [[ "${SB_CERT_INSECURE:-1}" == "0" && -n "${SB_SNI_HOST:-}" && "${SB_SNI_HOST}" != "www.bing.com" ]]; then
+    [[ "$LABEL" != "IPv6" ]] && TLS_HOST="${SB_SNI_HOST}"
+    INSECURE_PARAM=""
+  fi
+
   if [[ "${SB_ENABLE_HY2:-0}" == "1" ]]; then
     PORT="${SB_HY2_P4}"
     [[ "$LABEL" == "IPv6" ]] && PORT="${SB_HY2_P6}"
     HOP_PARAM=""
     [[ -n "${SB_HOP_RANGE:-}" ]] && HOP_PARAM="&ports=${SB_HOP_RANGE}&mport=${SB_HOP_RANGE}"
-    LINK="hysteria2://${SB_HY2_PASS}@${UHOST}:${PORT}?insecure=1&allowInsecure=1&allow_insecure=1&skip-cert-verify=1&sni=${SB_SNI_HOST}&alpn=h3${HOP_PARAM}#Hysteria2${SUFFIX}"
+    LINK="hysteria2://${SB_HY2_PASS}@${TLS_HOST}:${PORT}?sni=${SB_SNI_HOST}&alpn=h3${HOP_PARAM}${INSECURE_PARAM}#Hysteria2${SUFFIX}"
     MAIN_NODES_LIST+=("$LINK")
   fi
 
   if [[ "${SB_ENABLE_TUIC:-0}" == "1" ]]; then
     PORT="${SB_TUIC_P4}"
     [[ "$LABEL" == "IPv6" ]] && PORT="${SB_TUIC_P6}"
-    LINK="tuic://${SB_TUIC_UUID}:${SB_TUIC_PASS}@${UHOST}:${PORT}?congestion_control=bbr&alpn=h3&sni=${SB_SNI_HOST}&allow_insecure=1&allowInsecure=1&insecure=1&skip-cert-verify=1&version=5&udp_relay_mode=native#TUIC${SUFFIX}"
+    LINK="tuic://${SB_TUIC_UUID}:${SB_TUIC_PASS}@${TLS_HOST}:${PORT}?congestion_control=bbr&alpn=h3&sni=${SB_SNI_HOST}${INSECURE_PARAM}&version=5&udp_relay_mode=native#TUIC${SUFFIX}"
     MAIN_NODES_LIST+=("$LINK")
   fi
 done
@@ -1084,14 +1092,26 @@ for i in "${!HOSTS[@]}"; do
     [[ "$LABEL" == "IPv6" ]] && PORT="${SB_HY2_P6}"
     HOP_PARAM=""
     [[ -n "${SB_HOP_RANGE:-}" ]] && HOP_PARAM="&ports=${SB_HOP_RANGE}&mport=${SB_HOP_RANGE}"
-    LINK="hysteria2://${SB_HY2_PASS}@${UHOST}:${PORT}?insecure=1&allowInsecure=1&allow_insecure=1&skip-cert-verify=1&sni=${SB_SNI_HOST}&alpn=h3${HOP_PARAM}#Hysteria2${SUFFIX}"
+    TLS_HOST="$UHOST"
+    INSECURE_PARAM="&insecure=1&allowInsecure=1&allow_insecure=1&skip-cert-verify=1"
+    if [[ "${SB_CERT_INSECURE:-1}" == "0" && -n "${SB_SNI_HOST:-}" && "${SB_SNI_HOST}" != "www.bing.com" ]]; then
+      [[ "$LABEL" != "IPv6" ]] && TLS_HOST="${SB_SNI_HOST}"
+      INSECURE_PARAM=""
+    fi
+    LINK="hysteria2://${SB_HY2_PASS}@${TLS_HOST}:${PORT}?sni=${SB_SNI_HOST}&alpn=h3${HOP_PARAM}${INSECURE_PARAM}#Hysteria2${SUFFIX}"
     echo -e "${GREEN}${LINK}${PLAIN}"
   fi
 
   if [[ "${SB_ENABLE_TUIC:-0}" == "1" ]]; then
     PORT="${SB_TUIC_P4}"
     [[ "$LABEL" == "IPv6" ]] && PORT="${SB_TUIC_P6}"
-    LINK="tuic://${SB_TUIC_UUID}:${SB_TUIC_PASS}@${UHOST}:${PORT}?congestion_control=bbr&alpn=h3&sni=${SB_SNI_HOST}&allow_insecure=1&allowInsecure=1&insecure=1&skip-cert-verify=1&version=5&udp_relay_mode=native#TUIC${SUFFIX}"
+    TLS_HOST="$UHOST"
+    INSECURE_PARAM="&allow_insecure=1&allowInsecure=1&insecure=1&skip-cert-verify=1"
+    if [[ "${SB_CERT_INSECURE:-1}" == "0" && -n "${SB_SNI_HOST:-}" && "${SB_SNI_HOST}" != "www.bing.com" ]]; then
+      [[ "$LABEL" != "IPv6" ]] && TLS_HOST="${SB_SNI_HOST}"
+      INSECURE_PARAM=""
+    fi
+    LINK="tuic://${SB_TUIC_UUID}:${SB_TUIC_PASS}@${TLS_HOST}:${PORT}?congestion_control=bbr&alpn=h3&sni=${SB_SNI_HOST}${INSECURE_PARAM}&version=5&udp_relay_mode=native#TUIC${SUFFIX}"
     echo -e "${GREEN}${LINK}${PLAIN}"
   fi
 done
@@ -1114,6 +1134,13 @@ fi
     LABEL="${LABELS[$i]}"
     SUFFIX=""
     [[ -n "$LABEL" ]] && SUFFIX="_${LABEL}"
+
+    TLS_YAML_HOST="$H"
+    SKIP_CERT_YAML="true"
+    if [[ "${SB_CERT_INSECURE:-1}" == "0" && -n "${SB_SNI_HOST:-}" && "${SB_SNI_HOST}" != "www.bing.com" ]]; then
+      [[ "$LABEL" != "IPv6" ]] && TLS_YAML_HOST="${SB_SNI_HOST}"
+      SKIP_CERT_YAML="false"
+    fi
 
     if [[ "${SB_ENABLE_REALITY:-0}" == "1" ]]; then
       PORT="${SB_REALITY_P4}"
@@ -1142,12 +1169,12 @@ YAML
       cat <<YAML
   - name: "Hysteria2${SUFFIX}"
     type: hysteria2
-    server: "${H}"
+    server: "${TLS_YAML_HOST}"
     port: ${PORT}
     password: "${SB_HY2_PASS}"
     sni: "${SB_SNI_HOST}"
     alpn: [h3]
-    skip-cert-verify: true
+    skip-cert-verify: ${SKIP_CERT_YAML}
 $([[ -n "${SB_HOP_RANGE:-}" ]] && echo "    ports: \"${SB_HOP_RANGE}\"")
 YAML
     fi
@@ -1158,14 +1185,14 @@ YAML
       cat <<YAML
   - name: "TUIC${SUFFIX}"
     type: tuic
-    server: "${H}"
+    server: "${TLS_YAML_HOST}"
     port: ${PORT}
     uuid: "${SB_TUIC_UUID}"
     password: "${SB_TUIC_PASS}"
     version: 5
     alpn: [h3]
     sni: "${SB_SNI_HOST}"
-    skip-cert-verify: true
+    skip-cert-verify: ${SKIP_CERT_YAML}
     congestion-controller: bbr
     reduce-rtt: true
 YAML
