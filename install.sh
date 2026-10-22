@@ -856,6 +856,13 @@ case "${SB_OUT_MODE:-ipv4}" in
 esac
 
 url_host(){ local h="$1"; [[ "$h" == *:* ]] && echo "[$h]" || echo "$h"; }
+urlencode_b64(){
+  local s="$1"
+  s="${s//+/%2B}"
+  s="${s//\//%2F}"
+  s="${s//\=/%3D}"
+  echo "$s"
+}
 
 # 收集所有协议节点链接
 MAIN_NODES_LIST=()
@@ -908,8 +915,10 @@ for i in "${!HOSTS[@]}"; do
     PORT="${SB_AWG_P4}"
     [[ "$LABEL" == "IPv6" ]] && PORT="${SB_AWG_P6}"
     PSK_PARAM=""
-    [[ -n "${SB_AWG_PSK:-}" ]] && PSK_PARAM="&psk=${SB_AWG_PSK}"
-    LINK="awg://${SB_AWG_CLIENT_PRI}@${UHOST}:${PORT}?publickey=${SB_AWG_SERVER_PUB}&address=10.8.0.2${PSK_PARAM}&jc=${SB_AWG_JC:-4}&jmin=${SB_AWG_JMIN:-50}&jmax=${SB_AWG_JMAX:-1000}&s1=${SB_AWG_S1:-15}&s2=${SB_AWG_S2:-20}&h1=${SB_AWG_H1:-1}&h2=${SB_AWG_H2:-2}&h3=${SB_AWG_H3:-3}&h4=${SB_AWG_H4:-4}#AmneziaWG${SUFFIX}"
+    [[ -n "${SB_AWG_PSK:-}" ]] && PSK_PARAM="&psk=$(urlencode_b64 "${SB_AWG_PSK}")"
+    PRI_ENC="$(urlencode_b64 "${SB_AWG_CLIENT_PRI}")"
+    PUB_ENC="$(urlencode_b64 "${SB_AWG_SERVER_PUB}")"
+    LINK="awg://${PRI_ENC}@${UHOST}:${PORT}?publickey=${PUB_ENC}&address=10.8.0.2${PSK_PARAM}&jc=${SB_AWG_JC:-4}&jmin=${SB_AWG_JMIN:-50}&jmax=${SB_AWG_JMAX:-1000}&s1=${SB_AWG_S1:-15}&s2=${SB_AWG_S2:-20}&h1=${SB_AWG_H1:-1}&h2=${SB_AWG_H2:-2}&h3=${SB_AWG_H3:-3}&h4=${SB_AWG_H4:-4}#AmneziaWG${SUFFIX}"
     MAIN_NODES_LIST+=("$LINK")
   fi
 done
@@ -1178,8 +1187,10 @@ for i in "${!HOSTS[@]}"; do
     PORT="${SB_AWG_P4}"
     [[ "$LABEL" == "IPv6" ]] && PORT="${SB_AWG_P6}"
     PSK_PARAM=""
-    [[ -n "${SB_AWG_PSK:-}" ]] && PSK_PARAM="&psk=${SB_AWG_PSK}"
-    LINK="awg://${SB_AWG_CLIENT_PRI}@${UHOST}:${PORT}?publickey=${SB_AWG_SERVER_PUB}&address=10.8.0.2${PSK_PARAM}&jc=${SB_AWG_JC:-4}&jmin=${SB_AWG_JMIN:-50}&jmax=${SB_AWG_JMAX:-1000}&s1=${SB_AWG_S1:-15}&s2=${SB_AWG_S2:-20}&h1=${SB_AWG_H1:-1}&h2=${SB_AWG_H2:-2}&h3=${SB_AWG_H3:-3}&h4=${SB_AWG_H4:-4}#AmneziaWG${SUFFIX}"
+    [[ -n "${SB_AWG_PSK:-}" ]] && PSK_PARAM="&psk=$(urlencode_b64 "${SB_AWG_PSK}")"
+    PRI_ENC="$(urlencode_b64 "${SB_AWG_CLIENT_PRI}")"
+    PUB_ENC="$(urlencode_b64 "${SB_AWG_SERVER_PUB}")"
+    LINK="awg://${PRI_ENC}@${UHOST}:${PORT}?publickey=${PUB_ENC}&address=10.8.0.2${PSK_PARAM}&jc=${SB_AWG_JC:-4}&jmin=${SB_AWG_JMIN:-50}&jmax=${SB_AWG_JMAX:-1000}&s1=${SB_AWG_S1:-15}&s2=${SB_AWG_S2:-20}&h1=${SB_AWG_H1:-1}&h2=${SB_AWG_H2:-2}&h3=${SB_AWG_H3:-3}&h4=${SB_AWG_H4:-4}#AmneziaWG${SUFFIX}"
     echo -e "${GREEN}${LINK}${PLAIN}"
   fi
 done
