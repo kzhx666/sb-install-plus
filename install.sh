@@ -2476,7 +2476,7 @@ if [[ "$ENABLE_AWG" -eq 1 ]]; then
   ENDPOINTS_JSON="$(jq -n \
     --arg tag "awg-in" \
     --argjson port "$P_AWG_V4" \
-    --arg pri "$AWG_SERVER_PRIV" \
+    --arg pri "$AWG_SERVER_PRI" \
     --arg pub "$AWG_CLIENT_PUB" \
     --argjson jc "$AWG_JC" \
     --argjson jmin "$AWG_JMIN" \
@@ -2519,7 +2519,7 @@ if [[ "$ENABLE_AWG" -eq 1 ]]; then
 
   cat > "$CONF_DIR/awg.conf" <<EOF
 [Interface]
-PrivateKey = $AWG_CLIENT_PRIV
+PrivateKey = $AWG_CLIENT_PRI
 Address = 10.8.0.2/32
 DNS = 1.1.1.1, 8.8.8.8
 Jc = $AWG_JC
