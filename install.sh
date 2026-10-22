@@ -2489,6 +2489,7 @@ if [[ "$ENABLE_AWG" -eq 1 ]]; then
     --argjson port "$P_AWG_V4" \
     --arg pri "$AWG_SERVER_PRI" \
     --arg pub "$AWG_CLIENT_PUB" \
+    --arg psk "$AWG_PSK" \
     --argjson jc "$AWG_JC" \
     --argjson jmin "$AWG_JMIN" \
     --argjson jmax "$AWG_JMAX" \
@@ -2515,10 +2516,12 @@ if [[ "$ENABLE_AWG" -eq 1 ]]; then
         "h3": $h3,
         "h4": $h4,
         "peers": [
-          {
-            "public_key": $pub,
-            "allowed_ips": ["10.8.0.2/32"]
-          }
+          (
+            {
+              "public_key": $pub,
+              "allowed_ips": ["10.8.0.2/32"]
+            } + (if ($psk | length > 0) then { "pre_shared_key": $psk } else {} end)
+          )
         ]
       }
     ]'
