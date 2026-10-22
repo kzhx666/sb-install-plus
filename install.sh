@@ -247,13 +247,18 @@ _xray_arch_zip(){
   esac
 }
 
-# 部署/更新 Xray-core xHTTP 伴侣程序 (用于 OpenClash / HTTP/3 QUIC 优选)
+# 部署/更新 Xray-core xHTTP 守护程序 (用于 Cloudflare Argo 与 直连原生 xHTTP)
 install_xray_argo(){
   local uuid="$1"
-  local port="${2:-10086}"
-  local path="${3:-/argo}"
+  local argo_port="${2:-10086}"
+  local argo_path="${3:-/argo}"
+  local enable_direct="${4:-0}"
+  local direct_port="${5:-0}"
+  local direct_path="${6:-/xhttp}"
+  local cert_file="${7:-${CERT_PATH:-/etc/sing-box/cert/cert.pem}}"
+  local key_file="${8:-${KEY_PATH:-/etc/sing-box/cert/key.pem}}"
 
-  info "正在部署/校验 Xray-core xHTTP 伴侣程序 (用于 OpenClash / HTTP/3 优选)..."
+  info "正在部署/校验 Xray-core xHTTP 伴侣程序 (承接原生 xHTTP / Argo 流量)..."
   local xray_bin="/usr/local/bin/xray-argo"
   local xray_cfg="$CONF_DIR/xray-argo.json"
 
@@ -299,43 +304,56 @@ install_xray_argo(){
 
   ok "Xray-core 校验通过 ($("$xray_bin" version 2>/dev/null | head -n1))"
 
-  cat > "$xray_cfg" <<EOF
-{
-  "log": {
-    "loglevel": "warning"
-  },
-  "inbounds": [
-    {
-      "tag": "vless-xhttp-in",
-      "listen": "127.0.0.1",
-      "port": ${port},
-      "protocol": "vless",
-      "settings": {
-        "clients": [
-          {
-            "id": "${uuid}",
-            "level": 0
-          }
-        ],
-        "decryption": "none"
-      },
-      "streamSettings": {
-        "network": "xhttp",
-        "xhttpSettings": {
-          "path": "${path}",
-          "mode": "auto"
+  local inbounds="[]"
+  if [[ -n "${ARGO_TOKEN:-${SB_ARGO_TOKEN:-}}" && -n "${ARGO_DOMAIN:-${SB_ARGO_DOMAIN:-}}" && "${ARGO_TRANSPORT:-${SB_ARGO_TRANSPORT:-xhttp}}" == "xhttp" ]]; then
+    inbounds="$(echo "$inbounds" | jq --arg uuid "$uuid" --argjson port "$argo_port" --arg path "$argo_path" '
+      . + [{
+        "tag": "vless-xhttp-in",
+        "listen": "127.0.0.1",
+        "port": $port,
+        "protocol": "vless",
+        "settings": {
+          "clients": [{ "id": $uuid, "level": 0 }],
+          "decryption": "none"
+        },
+        "streamSettings": {
+          "network": "xhttp",
+          "xhttpSettings": { "path": $path, "mode": "auto" }
         }
-      }
-    }
-  ],
-  "outbounds": [
-    {
-      "protocol": "freedom",
-      "tag": "direct"
-    }
-  ]
-}
-EOF
+      }]
+    ')"
+  fi
+
+  if [[ "$enable_direct" -eq 1 && "$direct_port" -gt 0 ]]; then
+    inbounds="$(echo "$inbounds" | jq --arg uuid "$uuid" --argjson port "$direct_port" --arg path "$direct_path" \
+      --arg cert "$cert_file" --arg key "$key_file" '
+      . + [{
+        "tag": "vless-xhttp-direct-in",
+        "listen": "0.0.0.0",
+        "port": $port,
+        "protocol": "vless",
+        "settings": {
+          "clients": [{ "id": $uuid, "level": 0 }],
+          "decryption": "none"
+        },
+        "streamSettings": {
+          "network": "xhttp",
+          "security": "tls",
+          "tlsSettings": {
+            "certificates": [{ "certificateFile": $cert, "keyFile": $key }],
+            "alpn": ["h3", "h2", "http/1.1"]
+          },
+          "xhttpSettings": { "path": $path, "mode": "auto" }
+        }
+      }]
+    ')"
+  fi
+
+  jq -n --argjson inbounds "$inbounds" '{
+    "log": { "loglevel": "warning" },
+    "inbounds": $inbounds,
+    "outbounds": [{ "protocol": "freedom", "tag": "direct" }]
+  }' > "$xray_cfg"
   chmod 600 "$xray_cfg"
 
   if has_systemd; then
@@ -631,25 +649,37 @@ fw_allow_ports(){
 
 # --- 核心更新 ---
 update_core(){
-  echo -e "${YELLOW}正在获取 Sing-box 最新稳定版版本号...${PLAIN}"
-  local SB_TAG
-  SB_TAG="$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest 2>/dev/null | jq -r .tag_name || true)"
-  if [[ -z "${SB_TAG:-}" || "$SB_TAG" == "null" ]]; then
-    # 通过网页重定向 location 获取
-    SB_TAG="$(curl -sI https://github.com/SagerNet/sing-box/releases/latest 2>/dev/null | grep -i '^location:' | grep -oE 'v[0-9]+\.[0-9]+(\.[0-9]+)?' | head -n1 || true)"
-  fi
-  [[ -z "${SB_TAG:-}" ]] && SB_TAG="v1.12.0"
-
   local SB_ARCH TMP_DIR
   SB_ARCH="$(_arch_norm)"
   TMP_DIR="$(mktemp -d)"
 
-  info "正在下载 Sing-box 核心 $SB_TAG ($SB_ARCH)..."
-  wget -q -O "$TMP_DIR/sb.tar.gz" "https://github.com/SagerNet/sing-box/releases/download/${SB_TAG}/sing-box-${SB_TAG#v}-linux-${SB_ARCH}.tar.gz" || {
-    err "下载核心失败，请检查网络！"
-    rm -rf "$TMP_DIR"
-    return 1
-  }
+  # 当启用 AmneziaWG 时，下载具备 with_awg 混淆特性的 Sing-box-lx 核心
+  if [[ "${ENABLE_AWG:-${SB_ENABLE_AWG:-0}}" == "1" ]]; then
+    local LX_TAG="v1.14.3-lx.22"
+    info "检测到启用 AmneziaWG，正在下载支持 AWG 混淆的 Sing-box 核心 $LX_TAG ($SB_ARCH)..."
+    local LX_URL="https://github.com/Leadaxe/sing-box-lx/releases/download/${LX_TAG}/sing-box-${LX_TAG#v}-linux-${SB_ARCH}.tar.gz"
+    curl -fsSL --connect-timeout 8 -m 60 "https://hub.gitmirror.com/$LX_URL" -o "$TMP_DIR/sb.tar.gz" 2>/dev/null || \
+    curl -fsSL --connect-timeout 8 -m 60 "https://ghproxy.net/$LX_URL" -o "$TMP_DIR/sb.tar.gz" 2>/dev/null || \
+    curl -fsSL --connect-timeout 8 -m 60 "$LX_URL" -o "$TMP_DIR/sb.tar.gz" 2>/dev/null || \
+    wget -q -T 30 -O "$TMP_DIR/sb.tar.gz" "$LX_URL" || true
+  fi
+
+  if [[ ! -s "$TMP_DIR/sb.tar.gz" ]]; then
+    echo -e "${YELLOW}正在获取 Sing-box 核心版本号...${PLAIN}"
+    local SB_TAG
+    SB_TAG="$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest 2>/dev/null | jq -r .tag_name || true)"
+    if [[ -z "${SB_TAG:-}" || "$SB_TAG" == "null" ]]; then
+      SB_TAG="$(curl -sI https://github.com/SagerNet/sing-box/releases/latest 2>/dev/null | grep -i '^location:' | grep -oE 'v[0-9]+\.[0-9]+(\.[0-9]+)?' | head -n1 || true)"
+    fi
+    [[ -z "${SB_TAG:-}" ]] && SB_TAG="v1.12.0"
+
+    info "正在下载 Sing-box 核心 $SB_TAG ($SB_ARCH)..."
+    wget -q -O "$TMP_DIR/sb.tar.gz" "https://github.com/SagerNet/sing-box/releases/download/${SB_TAG}/sing-box-${SB_TAG#v}-linux-${SB_ARCH}.tar.gz" || {
+      err "下载核心失败，请检查网络！"
+      rm -rf "$TMP_DIR"
+      return 1
+    }
+  fi
 
   tar -xzf "$TMP_DIR/sb.tar.gz" -C "$TMP_DIR"
   service_stop
@@ -658,7 +688,7 @@ update_core(){
   chmod +x "$INSTALL_PATH"
   command -v setcap >/dev/null 2>&1 && setcap 'cap_net_bind_service,cap_net_admin=+ep' "$INSTALL_PATH" >/dev/null 2>&1 || true
   service_enable_restart
-  ok "Sing-box 核心已成功更新至 $SB_TAG 并重启服务！"
+  ok "Sing-box 核心已成功更新并重启服务！"
 }
 
 # --- 卸载逻辑 ---
@@ -864,6 +894,22 @@ for i in "${!HOSTS[@]}"; do
     PORT="${SB_TUIC_P4}"
     [[ "$LABEL" == "IPv6" ]] && PORT="${SB_TUIC_P6}"
     LINK="tuic://${SB_TUIC_UUID}:${SB_TUIC_PASS}@${TLS_HOST}:${PORT}?congestion_control=bbr&alpn=h3&sni=${SB_SNI_HOST}${INSECURE_PARAM}&version=5&udp_relay_mode=native#TUIC${SUFFIX}"
+    MAIN_NODES_LIST+=("$LINK")
+  fi
+
+  if [[ "${SB_ENABLE_XHTTP_DIRECT:-0}" == "1" ]]; then
+    PORT="${SB_XHTTP_DIRECT_P4}"
+    [[ "$LABEL" == "IPv6" ]] && PORT="${SB_XHTTP_DIRECT_P6}"
+    LINK="vless://${SB_UUID}@${TLS_HOST}:${PORT}?encryption=none&security=tls&sni=${SB_SNI_HOST}&type=xhttp&host=${SB_SNI_HOST}&path=%2Fxhttp&mode=auto${INSECURE_PARAM}#xHTTP${SUFFIX}"
+    MAIN_NODES_LIST+=("$LINK")
+  fi
+
+  if [[ "${SB_ENABLE_AWG:-0}" == "1" ]]; then
+    PORT="${SB_AWG_P4}"
+    [[ "$LABEL" == "IPv6" ]] && PORT="${SB_AWG_P6}"
+    PSK_PARAM=""
+    [[ -n "${SB_AWG_PSK:-}" ]] && PSK_PARAM="&psk=${SB_AWG_PSK}"
+    LINK="awg://${SB_AWG_CLIENT_PRI}@${UHOST}:${PORT}?publickey=${SB_AWG_SERVER_PUB}&address=10.8.0.2${PSK_PARAM}&jc=${SB_AWG_JC:-4}&jmin=${SB_AWG_JMIN:-50}&jmax=${SB_AWG_JMAX:-1000}&s1=${SB_AWG_S1:-15}&s2=${SB_AWG_S2:-20}&h1=${SB_AWG_H1:-1}&h2=${SB_AWG_H2:-2}&h3=${SB_AWG_H3:-3}&h4=${SB_AWG_H4:-4}#AmneziaWG${SUFFIX}"
     MAIN_NODES_LIST+=("$LINK")
   fi
 done
@@ -1114,6 +1160,28 @@ for i in "${!HOSTS[@]}"; do
     LINK="tuic://${SB_TUIC_UUID}:${SB_TUIC_PASS}@${TLS_HOST}:${PORT}?congestion_control=bbr&alpn=h3&sni=${SB_SNI_HOST}${INSECURE_PARAM}&version=5&udp_relay_mode=native#TUIC${SUFFIX}"
     echo -e "${GREEN}${LINK}${PLAIN}"
   fi
+
+  if [[ "${SB_ENABLE_XHTTP_DIRECT:-0}" == "1" ]]; then
+    PORT="${SB_XHTTP_DIRECT_P4}"
+    [[ "$LABEL" == "IPv6" ]] && PORT="${SB_XHTTP_DIRECT_P6}"
+    TLS_HOST="$UHOST"
+    INSECURE_PARAM="&insecure=1&allowInsecure=1&allow_insecure=1&skip-cert-verify=1"
+    if [[ "${SB_CERT_INSECURE:-1}" == "0" && -n "${SB_SNI_HOST:-}" && "${SB_SNI_HOST}" != "www.bing.com" ]]; then
+      [[ "$LABEL" != "IPv6" ]] && TLS_HOST="${SB_SNI_HOST}"
+      INSECURE_PARAM=""
+    fi
+    LINK="vless://${SB_UUID}@${TLS_HOST}:${PORT}?encryption=none&security=tls&sni=${SB_SNI_HOST}&type=xhttp&host=${SB_SNI_HOST}&path=%2Fxhttp&mode=auto${INSECURE_PARAM}#xHTTP${SUFFIX}"
+    echo -e "${GREEN}${LINK}${PLAIN}"
+  fi
+
+  if [[ "${SB_ENABLE_AWG:-0}" == "1" ]]; then
+    PORT="${SB_AWG_P4}"
+    [[ "$LABEL" == "IPv6" ]] && PORT="${SB_AWG_P6}"
+    PSK_PARAM=""
+    [[ -n "${SB_AWG_PSK:-}" ]] && PSK_PARAM="&psk=${SB_AWG_PSK}"
+    LINK="awg://${SB_AWG_CLIENT_PRI}@${UHOST}:${PORT}?publickey=${SB_AWG_SERVER_PUB}&address=10.8.0.2${PSK_PARAM}&jc=${SB_AWG_JC:-4}&jmin=${SB_AWG_JMIN:-50}&jmax=${SB_AWG_JMAX:-1000}&s1=${SB_AWG_S1:-15}&s2=${SB_AWG_S2:-20}&h1=${SB_AWG_H1:-1}&h2=${SB_AWG_H2:-2}&h3=${SB_AWG_H3:-3}&h4=${SB_AWG_H4:-4}#AmneziaWG${SUFFIX}"
+    echo -e "${GREEN}${LINK}${PLAIN}"
+  fi
 done
 
 # Argo 隧道节点放最后
@@ -1197,6 +1265,62 @@ YAML
     reduce-rtt: true
 YAML
     fi
+
+    if [[ "${SB_ENABLE_XHTTP_DIRECT:-0}" == "1" ]]; then
+      PORT="${SB_XHTTP_DIRECT_P4}"
+      [[ "$LABEL" == "IPv6" ]] && PORT="${SB_XHTTP_DIRECT_P6}"
+      cat <<YAML
+  - name: "xHTTP${SUFFIX}"
+    type: vless
+    server: "${TLS_YAML_HOST}"
+    port: ${PORT}
+    uuid: "${SB_UUID}"
+    cipher: auto
+    udp: true
+    tls: true
+    skip-cert-verify: ${SKIP_CERT_YAML}
+    servername: "${SB_SNI_HOST}"
+    network: xhttp
+    alpn:
+      - h3
+      - h2
+      - http/1.1
+    xhttp-opts:
+      path: /xhttp
+      host: "${SB_SNI_HOST}"
+      mode: auto
+YAML
+    fi
+
+    if [[ "${SB_ENABLE_AWG:-0}" == "1" ]]; then
+      PORT="${SB_AWG_P4}"
+      [[ "$LABEL" == "IPv6" ]] && PORT="${SB_AWG_P6}"
+      cat <<YAML
+  - name: "AmneziaWG${SUFFIX}"
+    type: wireguard
+    server: "${H}"
+    port: ${PORT}
+    ip: "10.8.0.2"
+    public-key: "${SB_AWG_SERVER_PUB}"
+    private-key: "${SB_AWG_CLIENT_PRI}"
+$([[ -n "${SB_AWG_PSK:-}" ]] && echo "    preshared-key: \"${SB_AWG_PSK}\"")
+    udp: true
+    remote-dns-resolve: true
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    amnezia-wg-option:
+      jc: ${SB_AWG_JC:-4}
+      jmin: ${SB_AWG_JMIN:-50}
+      jmax: ${SB_AWG_JMAX:-1000}
+      s1: ${SB_AWG_S1:-15}
+      s2: ${SB_AWG_S2:-20}
+      h1: ${SB_AWG_H1:-1}
+      h2: ${SB_AWG_H2:-2}
+      h3: ${SB_AWG_H3:-3}
+      h4: ${SB_AWG_H4:-4}
+YAML
+    fi
   done
 
   # Argo 放在最后 (支持 xHTTP 与 WS)
@@ -1244,6 +1368,13 @@ echo -e "\n${BLUE}==============================================================
 echo -e "${YELLOW}>>> Mihomo / Clash Meta 格式配置已保存至: ${MIHOMO_FILE}${PLAIN}"
 echo -e "${BLUE}==============================================================${PLAIN}"
 cat "$MIHOMO_FILE"
+
+if [[ "${SB_ENABLE_AWG:-0}" == "1" && -f "/etc/sing-box/awg.conf" ]]; then
+  echo -e "\n${BLUE}==============================================================${PLAIN}"
+  echo -e "${YELLOW}>>> AmneziaWG 官方客户端配置已保存至: /etc/sing-box/awg.conf${PLAIN}"
+  echo -e "${BLUE}==============================================================${PLAIN}"
+  cat "/etc/sing-box/awg.conf"
+fi
 
 echo -e "\n${BLUE}==============================================================${PLAIN}"
 echo -e ">>> 随时输入 ${GREEN}sb${PLAIN} 查看所有节点，输入 ${GREEN}sb push${PLAIN} 推送节点至管理平台！"
@@ -1405,6 +1536,10 @@ _EXT_INPUT_DOMAIN="${INPUT_DOMAIN:-${DOMAIN:-}}"
 _EXT_ENABLE_REALITY="${SB_ENABLE_REALITY:-}"
 _EXT_ENABLE_HY2="${SB_ENABLE_HY2:-}"
 _EXT_ENABLE_TUIC="${SB_ENABLE_TUIC:-}"
+_EXT_ENABLE_XHTTP_DIRECT="${SB_ENABLE_XHTTP_DIRECT:-}"
+_EXT_ENABLE_AWG="${SB_ENABLE_AWG:-}"
+_EXT_PORT_XHTTP_DIRECT="${PORT_XHTTP_DIRECT:-}"
+_EXT_PORT_AWG="${PORT_AWG:-}"
 _EXT_HOP_RANGE="${SB_HOP_RANGE:-}"
 _EXT_OUT_MODE="${SB_OUT_MODE:-${OUT_MODE:-}}"
 
@@ -1426,6 +1561,10 @@ if [[ "${_EXT_AUTO_INSTALL}" -eq 1 || "${1:-}" == "--auto" || "${1:-}" == "auto"
   [[ -n "$_EXT_ENABLE_REALITY" ]] && SB_ENABLE_REALITY="$_EXT_ENABLE_REALITY"
   [[ -n "$_EXT_ENABLE_HY2" ]] && SB_ENABLE_HY2="$_EXT_ENABLE_HY2"
   [[ -n "$_EXT_ENABLE_TUIC" ]] && SB_ENABLE_TUIC="$_EXT_ENABLE_TUIC"
+  [[ -n "$_EXT_ENABLE_XHTTP_DIRECT" ]] && SB_ENABLE_XHTTP_DIRECT="$_EXT_ENABLE_XHTTP_DIRECT"
+  [[ -n "$_EXT_ENABLE_AWG" ]] && SB_ENABLE_AWG="$_EXT_ENABLE_AWG"
+  [[ -n "$_EXT_PORT_XHTTP_DIRECT" ]] && PORT_XHTTP_DIRECT="$_EXT_PORT_XHTTP_DIRECT"
+  [[ -n "$_EXT_PORT_AWG" ]] && PORT_AWG="$_EXT_PORT_AWG"
   [[ -n "$_EXT_HOP_RANGE" ]] && SB_HOP_RANGE="$_EXT_HOP_RANGE"
   [[ -n "$_EXT_OUT_MODE" ]] && SB_OUT_MODE="$_EXT_OUT_MODE"
 fi
@@ -1494,10 +1633,14 @@ echo -e "--------------------------------------------------------------"
 ENABLE_REALITY=1
 ENABLE_HY2=1
 ENABLE_TUIC=1
+ENABLE_XHTTP_DIRECT=1
+ENABLE_AWG=1
 if [[ "${AUTO_INSTALL:-0}" -eq 1 ]]; then
   ENABLE_REALITY="${SB_ENABLE_REALITY:-1}"
   ENABLE_HY2="${SB_ENABLE_HY2:-1}"
   ENABLE_TUIC="${SB_ENABLE_TUIC:-1}"
+  ENABLE_XHTTP_DIRECT="${SB_ENABLE_XHTTP_DIRECT:-1}"
+  ENABLE_AWG="${SB_ENABLE_AWG:-1}"
 else
   read -r -p "是否启用 VLESS-Reality (TCP 顶流、免证书、抗封锁) [Y/n] (默认 Y): " ANS_R || true
   [[ "$ANS_R" =~ ^[Nn]$ ]] && ENABLE_REALITY=0
@@ -1507,9 +1650,15 @@ else
 
   read -r -p "是否启用 TUIC v5 (QUIC 低延迟、高速备用栈) [Y/n] (默认 Y): " ANS_T || true
   [[ "$ANS_T" =~ ^[Nn]$ ]] && ENABLE_TUIC=0
+
+  read -r -p "是否启用 直连原生 xHTTP (HTTP/2-3 多路复用) [Y/n] (默认 Y): " ANS_X || true
+  [[ "$ANS_X" =~ ^[Nn]$ ]] && ENABLE_XHTTP_DIRECT=0
+
+  read -r -p "是否启用 AmneziaWG (特征混淆 WireGuard、抗 DPI) [Y/n] (默认 Y): " ANS_A || true
+  [[ "$ANS_A" =~ ^[Nn]$ ]] && ENABLE_AWG=0
 fi
 
-if [[ "$ENABLE_REALITY" -eq 0 && "$ENABLE_HY2" -eq 0 && "$ENABLE_TUIC" -eq 0 ]]; then
+if [[ "$ENABLE_REALITY" -eq 0 && "$ENABLE_HY2" -eq 0 && "$ENABLE_TUIC" -eq 0 && "$ENABLE_XHTTP_DIRECT" -eq 0 && "$ENABLE_AWG" -eq 0 ]]; then
   warn "未启用任何协议，默认强制启用 VLESS-Reality！"
   ENABLE_REALITY=1
 fi
@@ -1518,19 +1667,21 @@ echo -e "已选定协议组合："
 [[ "$ENABLE_REALITY" -eq 1 ]] && echo -e "  - ${GREEN}VLESS-Reality${PLAIN} (TCP)"
 [[ "$ENABLE_HY2" -eq 1 ]] && echo -e "  - ${GREEN}Hysteria 2${PLAIN} (UDP)"
 [[ "$ENABLE_TUIC" -eq 1 ]] && echo -e "  - ${GREEN}TUIC v5${PLAIN} (UDP)"
+[[ "$ENABLE_XHTTP_DIRECT" -eq 1 ]] && echo -e "  - ${GREEN}直连原生 xHTTP${PLAIN} (TCP/UDP HTTP/3)"
+[[ "$ENABLE_AWG" -eq 1 ]] && echo -e "  - ${GREEN}AmneziaWG${PLAIN} (UDP 混淆)"
 echo -e "--------------------------------------------------------------"
 
 # ==============================================================================
 # [4/10] 端口与端口跳跃交互配置
 # ==============================================================================
 echo -e "${YELLOW}[4/10] 端口分配与跳跃设置...${PLAIN}"
-PROTO_COUNT=$((ENABLE_REALITY + ENABLE_HY2 + ENABLE_TUIC))
+PROTO_COUNT=$((ENABLE_REALITY + ENABLE_HY2 + ENABLE_TUIC + ENABLE_XHTTP_DIRECT + ENABLE_AWG))
 TOTAL_PORTS=$PROTO_COUNT
 [[ "$OUT_MODE" == "both" ]] && TOTAL_PORTS=$((PROTO_COUNT * 2))
 
 if [[ "${AUTO_INSTALL:-0}" -eq 1 ]]; then
   # 自动部署模式
-  if [[ -n "${PORT_REALITY:-}" || -n "${PORT_HY2:-}" || -n "${PORT_TUIC:-}" ]]; then
+  if [[ -n "${PORT_REALITY:-}" || -n "${PORT_HY2:-}" || -n "${PORT_TUIC:-}" || -n "${PORT_XHTTP_DIRECT:-}" || -n "${PORT_AWG:-}" ]]; then
     # 直接使用显式指定的端口 (如 NAT 受限端口分配)
     P_REALITY_V4="${PORT_REALITY:-0}"
     P_REALITY_V6="${PORT_REALITY:-0}"
@@ -1538,6 +1689,10 @@ if [[ "${AUTO_INSTALL:-0}" -eq 1 ]]; then
     P_HY2_V6="${PORT_HY2:-0}"
     P_TUIC_V4="${PORT_TUIC:-0}"
     P_TUIC_V6="${PORT_TUIC:-0}"
+    P_XHTTP_DIRECT_V4="${PORT_XHTTP_DIRECT:-0}"
+    P_XHTTP_DIRECT_V6="${PORT_XHTTP_DIRECT:-0}"
+    P_AWG_V4="${PORT_AWG:-0}"
+    P_AWG_V6="${PORT_AWG:-0}"
   else
     BASE_PORT="${BASE_PORT:-}"
     if [[ -z "${BASE_PORT:-}" ]] || ! [[ "$BASE_PORT" =~ ^[0-9]+$ ]] || [[ "$BASE_PORT" -lt 1024 || "$((BASE_PORT + TOTAL_PORTS))" -gt 65535 ]]; then
@@ -1549,6 +1704,8 @@ if [[ "${AUTO_INSTALL:-0}" -eq 1 ]]; then
     P_REALITY_V4=0; P_REALITY_V6=0
     P_HY2_V4=0; P_HY2_V6=0
     P_TUIC_V4=0; P_TUIC_V6=0
+    P_XHTTP_DIRECT_V4=0; P_XHTTP_DIRECT_V6=0
+    P_AWG_V4=0; P_AWG_V6=0
     if [[ "$ENABLE_REALITY" -eq 1 ]]; then
       P_REALITY_V4=$((BASE_V4 + cur_offset))
       P_REALITY_V6=$((BASE_V6 + cur_offset))
@@ -1562,6 +1719,17 @@ if [[ "${AUTO_INSTALL:-0}" -eq 1 ]]; then
     if [[ "$ENABLE_TUIC" -eq 1 ]]; then
       P_TUIC_V4=$((BASE_V4 + cur_offset))
       P_TUIC_V6=$((BASE_V6 + cur_offset))
+      cur_offset=$((cur_offset + 1))
+    fi
+    if [[ "$ENABLE_XHTTP_DIRECT" -eq 1 ]]; then
+      P_XHTTP_DIRECT_V4=$((BASE_V4 + cur_offset))
+      P_XHTTP_DIRECT_V6=$((BASE_V6 + cur_offset))
+      cur_offset=$((cur_offset + 1))
+    fi
+    if [[ "$ENABLE_AWG" -eq 1 ]]; then
+      P_AWG_V4=$((BASE_V4 + cur_offset))
+      P_AWG_V6=$((BASE_V6 + cur_offset))
+      cur_offset=$((cur_offset + 1))
     fi
   fi
   HOP_RANGE="${SB_HOP_RANGE:-${HOP_RANGE:-}}"
@@ -1579,6 +1747,8 @@ else
   P_REALITY_V4=0; P_REALITY_V6=0
   P_HY2_V4=0; P_HY2_V6=0
   P_TUIC_V4=0; P_TUIC_V6=0
+  P_XHTTP_DIRECT_V4=0; P_XHTTP_DIRECT_V6=0
+  P_AWG_V4=0; P_AWG_V6=0
 
   if [[ "$ENABLE_REALITY" -eq 1 ]]; then
     P_REALITY_V4=$((BASE_V4 + cur_offset))
@@ -1595,12 +1765,24 @@ else
     P_TUIC_V6=$((BASE_V6 + cur_offset))
     cur_offset=$((cur_offset + 1))
   fi
+  if [[ "$ENABLE_XHTTP_DIRECT" -eq 1 ]]; then
+    P_XHTTP_DIRECT_V4=$((BASE_V4 + cur_offset))
+    P_XHTTP_DIRECT_V6=$((BASE_V6 + cur_offset))
+    cur_offset=$((cur_offset + 1))
+  fi
+  if [[ "$ENABLE_AWG" -eq 1 ]]; then
+    P_AWG_V4=$((BASE_V4 + cur_offset))
+    P_AWG_V6=$((BASE_V6 + cur_offset))
+    cur_offset=$((cur_offset + 1))
+  fi
 fi
 
 echo -e ">>> 端口规划完成:"
 [[ "$ENABLE_REALITY" -eq 1 ]] && echo -e "  Reality 端口: ${GREEN}${P_REALITY_V4}${PLAIN} $([[ "$OUT_MODE" == "both" ]] && echo "(v6: ${P_REALITY_V6})")"
 [[ "$ENABLE_HY2" -eq 1 ]] && echo -e "  Hy2 端口    : ${GREEN}${P_HY2_V4}${PLAIN} $([[ "$OUT_MODE" == "both" ]] && echo "(v6: ${P_HY2_V6})")"
 [[ "$ENABLE_TUIC" -eq 1 ]] && echo -e "  TUIC 端口   : ${GREEN}${P_TUIC_V4}${PLAIN} $([[ "$OUT_MODE" == "both" ]] && echo "(v6: ${P_TUIC_V6})")"
+[[ "$ENABLE_XHTTP_DIRECT" -eq 1 ]] && echo -e "  xHTTP 端口  : ${GREEN}${P_XHTTP_DIRECT_V4}${PLAIN} $([[ "$OUT_MODE" == "both" ]] && echo "(v6: ${P_XHTTP_DIRECT_V6})")"
+[[ "$ENABLE_AWG" -eq 1 ]] && echo -e "  AWG 端口    : ${GREEN}${P_AWG_V4}${PLAIN} $([[ "$OUT_MODE" == "both" ]] && echo "(v6: ${P_AWG_V6})")"
 
 # Hysteria 2 端口跳跃交互
 HOP_RANGE="${HOP_RANGE:-}"
@@ -1959,7 +2141,7 @@ fi
 # [7/10] 安装/更新 Sing-box 核心
 # ==============================================================================
 echo -e "\n${YELLOW}[7/10] 安装/校验 Sing-box 核心程序...${PLAIN}"
-if [[ ! -x "$INSTALL_PATH" ]]; then
+if [[ ! -x "$INSTALL_PATH" ]] || { [[ "${ENABLE_AWG:-0}" == "1" ]] && ! "$INSTALL_PATH" version 2>/dev/null | grep -q "with_awg"; }; then
   update_core
 else
   ok "Sing-box 核心已存在 ($($INSTALL_PATH version 2>/dev/null | head -n1 || echo '已就绪'))"
@@ -1974,6 +2156,12 @@ echo -e "${YELLOW}[8/10] 生成 Sing-box 核心极速配置文件 (config.json).
 UUID=""; TUIC_UUID=""
 HY2_PASS=""; TUIC_PASS=""
 R_PRI=""; R_PUB=""; SHORT_ID=""
+AWG_SERVER_PRI=""; AWG_SERVER_PUB=""
+AWG_CLIENT_PRI=""; AWG_CLIENT_PUB=""
+AWG_PSK=""
+AWG_JC=4; AWG_JMIN=50; AWG_JMAX=1000
+AWG_S1=15; AWG_S2=20
+AWG_H1=1; AWG_H2=2; AWG_H3=3; AWG_H4=4
 
 if [[ -f "$STATE_FILE" ]]; then
   # shellcheck disable=SC1090
@@ -1985,6 +2173,20 @@ if [[ -f "$STATE_FILE" ]]; then
   R_PRI="${SB_REALITY_PRI:-}"
   R_PUB="${SB_REALITY_PUB:-}"
   SHORT_ID="${SB_SHORT_ID:-}"
+  AWG_SERVER_PRI="${SB_AWG_SERVER_PRI:-}"
+  AWG_SERVER_PUB="${SB_AWG_SERVER_PUB:-}"
+  AWG_CLIENT_PRI="${SB_AWG_CLIENT_PRI:-}"
+  AWG_CLIENT_PUB="${SB_AWG_CLIENT_PUB:-}"
+  AWG_PSK="${SB_AWG_PSK:-}"
+  AWG_JC="${SB_AWG_JC:-4}"
+  AWG_JMIN="${SB_AWG_JMIN:-50}"
+  AWG_JMAX="${SB_AWG_JMAX:-1000}"
+  AWG_S1="${SB_AWG_S1:-15}"
+  AWG_S2="${SB_AWG_S2:-20}"
+  AWG_H1="${SB_AWG_H1:-1}"
+  AWG_H2="${SB_AWG_H2:-2}"
+  AWG_H3="${SB_AWG_H3:-3}"
+  AWG_H4="${SB_AWG_H4:-4}"
 fi
 
 [[ -z "$UUID" ]] && UUID="$(cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16)"
@@ -1992,6 +2194,22 @@ fi
 [[ -z "$HY2_PASS" ]] && HY2_PASS="$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 20)"
 [[ -z "$TUIC_PASS" ]] && TUIC_PASS="$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 20)"
 [[ -z "$SHORT_ID" ]] && SHORT_ID="$(openssl rand -hex 8)"
+
+if [[ "$ENABLE_AWG" -eq 1 ]]; then
+  if [[ -z "$AWG_SERVER_PRI" || -z "$AWG_SERVER_PUB" ]]; then
+    SRV_PAIR="$($INSTALL_PATH generate wg-keypair 2>&1 || true)"
+    AWG_SERVER_PRI="$(echo "$SRV_PAIR" | grep -i "PrivateKey" | awk '{print $2}' || true)"
+    AWG_SERVER_PUB="$(echo "$SRV_PAIR" | grep -i "PublicKey" | awk '{print $2}' || true)"
+  fi
+  if [[ -z "$AWG_CLIENT_PRI" || -z "$AWG_CLIENT_PUB" ]]; then
+    CLI_PAIR="$($INSTALL_PATH generate wg-keypair 2>&1 || true)"
+    AWG_CLIENT_PRI="$(echo "$CLI_PAIR" | grep -i "PrivateKey" | awk '{print $2}' || true)"
+    AWG_CLIENT_PUB="$(echo "$CLI_PAIR" | grep -i "PublicKey" | awk '{print $2}' || true)"
+  fi
+  if [[ -z "$AWG_PSK" ]]; then
+    AWG_PSK="$(openssl rand -base64 32 2>/dev/null || true)"
+  fi
+fi
 
 if [[ -z "$R_PRI" || -z "$R_PUB" ]]; then
   KEYPAIR="$($INSTALL_PATH generate reality-keypair 2>&1 || true)"
@@ -2252,10 +2470,82 @@ if [[ -n "${ARGO_TOKEN:-}" && -n "${ARGO_DOMAIN:-}" ]]; then
   fi
 fi
 
+# AmneziaWG Endpoint 构建与专属配置文件生成 (Sing-box-lx core)
+ENDPOINTS_JSON="[]"
+if [[ "$ENABLE_AWG" -eq 1 ]]; then
+  ENDPOINTS_JSON="$(jq -n \
+    --arg tag "awg-in" \
+    --argjson port "$P_AWG_V4" \
+    --arg pri "$AWG_SERVER_PRIV" \
+    --arg pub "$AWG_CLIENT_PUB" \
+    --argjson jc "$AWG_JC" \
+    --argjson jmin "$AWG_JMIN" \
+    --argjson jmax "$AWG_JMAX" \
+    --argjson s1 "$AWG_S1" \
+    --argjson s2 "$AWG_S2" \
+    --argjson h1 "$AWG_H1" \
+    --argjson h2 "$AWG_H2" \
+    --argjson h3 "$AWG_H3" \
+    --argjson h4 "$AWG_H4" \
+    '[
+      {
+        "type": "wireguard",
+        "tag": $tag,
+        "listen_port": $port,
+        "address": ["10.8.0.1/24"],
+        "private_key": $pri,
+        "jc": $jc,
+        "jmin": $jmin,
+        "jmax": $jmax,
+        "s1": $s1,
+        "s2": $s2,
+        "h1": $h1,
+        "h2": $h2,
+        "h3": $h3,
+        "h4": $h4,
+        "peers": [
+          {
+            "public_key": $pub,
+            "allowed_ips": ["10.8.0.2/32"]
+          }
+        ]
+      }
+    ]'
+  )"
+
+  RULES_JSON="$(echo "$RULES_JSON" | jq --arg final "$FINAL_OUT" '
+    . + [{ "inbound": ["awg-in"], "outbound": $final }]
+  ')"
+
+  cat > "$CONF_DIR/awg.conf" <<EOF
+[Interface]
+PrivateKey = $AWG_CLIENT_PRIV
+Address = 10.8.0.2/32
+DNS = 1.1.1.1, 8.8.8.8
+Jc = $AWG_JC
+Jmin = $AWG_JMIN
+Jmax = $AWG_JMAX
+S1 = $AWG_S1
+S2 = $AWG_S2
+H1 = $AWG_H1
+H2 = $AWG_H2
+H3 = $AWG_H3
+H4 = $AWG_H4
+
+[Peer]
+PublicKey = $AWG_SERVER_PUB
+Endpoint = ${DOMAIN_NAME:-$LOCAL_IPV4}:${P_AWG_V4}
+AllowedIPs = 0.0.0.0/0, ::/0
+PersistentKeepalive = 25
+EOF
+  chmod 600 "$CONF_DIR/awg.conf" 2>/dev/null || true
+fi
+
 # 整合最终配置 (带极速本地内存 DNS 缓存)
 FINAL_CONFIG="$(jq -n \
   --argjson inbounds "$INBOUNDS_JSON" \
   --argjson outbounds "$OUTBOUNDS_JSON" \
+  --argjson endpoints "$ENDPOINTS_JSON" \
   --argjson rules "$RULES_JSON" \
   --arg final_out "$FINAL_OUT" \
   '{
@@ -2290,7 +2580,7 @@ FINAL_CONFIG="$(jq -n \
       "rules": $rules,
       "final": $final_out
     }
-  }'
+  } | if ($endpoints | length > 0) then . + { "endpoints": $endpoints } else . end'
 )"
 
 echo "$FINAL_CONFIG" > "$CONF_DIR/config.json"
@@ -2362,9 +2652,14 @@ chmod +x "$HOP_SCRIPT"
 # 放行防火墙端口
 TCP_ALLOW=""
 UDP_ALLOW=""
-[[ "$ENABLE_REALITY" -eq 1 ]] && TCP_ALLOW="${P_REALITY_V4} $([[ "$OUT_MODE" == "both" ]] && echo "$P_REALITY_V6")"
+[[ "$ENABLE_REALITY" -eq 1 ]] && TCP_ALLOW="${TCP_ALLOW} ${P_REALITY_V4} $([[ "$OUT_MODE" == "both" ]] && echo "$P_REALITY_V6")"
 [[ "$ENABLE_HY2" -eq 1 ]] && UDP_ALLOW="${UDP_ALLOW} ${P_HY2_V4} $([[ "$OUT_MODE" == "both" ]] && echo "$P_HY2_V6")"
 [[ "$ENABLE_TUIC" -eq 1 ]] && UDP_ALLOW="${UDP_ALLOW} ${P_TUIC_V4} $([[ "$OUT_MODE" == "both" ]] && echo "$P_TUIC_V6")"
+[[ "$ENABLE_XHTTP_DIRECT" -eq 1 ]] && {
+  TCP_ALLOW="${TCP_ALLOW} ${P_XHTTP_DIRECT_V4} $([[ "$OUT_MODE" == "both" ]] && echo "$P_XHTTP_DIRECT_V6")"
+  UDP_ALLOW="${UDP_ALLOW} ${P_XHTTP_DIRECT_V4} $([[ "$OUT_MODE" == "both" ]] && echo "$P_XHTTP_DIRECT_V6")"
+}
+[[ "$ENABLE_AWG" -eq 1 ]] && UDP_ALLOW="${UDP_ALLOW} ${P_AWG_V4} $([[ "$OUT_MODE" == "both" ]] && echo "$P_AWG_V6")"
 
 fw_allow_ports "$TCP_ALLOW" "$UDP_ALLOW" "$HOP_RANGE"
 apply_tuning
@@ -2374,24 +2669,28 @@ if [[ -n "$HOP_RANGE" ]]; then
   /usr/local/bin/sb-hop.sh >/dev/null 2>&1 || true
 fi
 
-# 配置与启动 Cloudflare Argo 隧道 (cloudflared + xHTTP/WS 传输)
+# 启动 Xray 守护程序 (若启用 Argo xHTTP 或 直连原生 xHTTP)
+ENABLE_XRAY=0
+[[ "${ARGO_TRANSPORT:-xhttp}" == "xhttp" && -n "${ARGO_TOKEN:-}" && -n "${ARGO_DOMAIN:-}" ]] && ENABLE_XRAY=1
+[[ "$ENABLE_XHTTP_DIRECT" -eq 1 ]] && ENABLE_XRAY=1
+
+if [[ "$ENABLE_XRAY" -eq 1 ]]; then
+  install_xray_argo "$UUID" "${ARGO_PORT:-10086}" "/argo" "$ENABLE_XHTTP_DIRECT" "${P_XHTTP_DIRECT_V4:-0}" "/xhttp" "$CERT_PATH" "$KEY_PATH"
+else
+  if has_systemd; then
+    systemctl stop xray-argo >/dev/null 2>&1 || true
+    systemctl disable xray-argo >/dev/null 2>&1 || true
+  elif has_openrc; then
+    rc-service xray-argo stop >/dev/null 2>&1 || true
+    rc-update del xray-argo default >/dev/null 2>&1 || true
+  fi
+  pkill -9 -f xray-argo >/dev/null 2>&1 || true
+fi
+
+# 配置与启动 Cloudflare Argo 隧道 (cloudflared)
 if [[ -n "${ARGO_TOKEN:-}" && -n "${ARGO_DOMAIN:-}" ]]; then
   info "正在配置 Cloudflare Argo 隧道 (cloudflared)..."
   local_arch="$(_arch_norm)"
-
-  # 若选择 xHTTP 传输，启动 Xray-core 伴侣守护进程
-  if [[ "${ARGO_TRANSPORT:-xhttp}" == "xhttp" ]]; then
-    install_xray_argo "$UUID" "$ARGO_PORT" "/argo"
-  else
-    if has_systemd; then
-      systemctl stop xray-argo >/dev/null 2>&1 || true
-      systemctl disable xray-argo >/dev/null 2>&1 || true
-    elif has_openrc; then
-      rc-service xray-argo stop >/dev/null 2>&1 || true
-      rc-update del xray-argo default >/dev/null 2>&1 || true
-    fi
-    pkill -9 -f xray-argo >/dev/null 2>&1 || true
-  fi
 
   # 校验当前已有二进制是否完整可用，若损坏则强制清理重新下载
   if ! /usr/local/bin/cloudflared --version >/dev/null 2>&1; then
@@ -2462,20 +2761,25 @@ EOF
     fi
   fi
 else
-  # 未配置或已关闭 Argo 隧道，停止相关后台进程
+  # 未配置或已关闭 Argo 隧道，停止 cloudflared
   if has_systemd; then
     systemctl stop cloudflared >/dev/null 2>&1 || true
     systemctl disable cloudflared >/dev/null 2>&1 || true
-    systemctl stop xray-argo >/dev/null 2>&1 || true
-    systemctl disable xray-argo >/dev/null 2>&1 || true
   elif has_openrc; then
     rc-service cloudflared stop >/dev/null 2>&1 || true
     rc-update del cloudflared default >/dev/null 2>&1 || true
-    rc-service xray-argo stop >/dev/null 2>&1 || true
-    rc-update del xray-argo default >/dev/null 2>&1 || true
   fi
   pkill -9 -f cloudflared >/dev/null 2>&1 || true
-  pkill -9 -f xray-argo >/dev/null 2>&1 || true
+  if [[ "$ENABLE_XRAY" -eq 0 ]]; then
+    if has_systemd; then
+      systemctl stop xray-argo >/dev/null 2>&1 || true
+      systemctl disable xray-argo >/dev/null 2>&1 || true
+    elif has_openrc; then
+      rc-service xray-argo stop >/dev/null 2>&1 || true
+      rc-update del xray-argo default >/dev/null 2>&1 || true
+    fi
+    pkill -9 -f xray-argo >/dev/null 2>&1 || true
+  fi
 fi
 
 # 保存状态文件
@@ -2497,12 +2801,32 @@ SB_CERT_INSECURE="${CERT_INSECURE}"
 SB_ENABLE_REALITY="${ENABLE_REALITY}"
 SB_ENABLE_HY2="${ENABLE_HY2}"
 SB_ENABLE_TUIC="${ENABLE_TUIC}"
+SB_ENABLE_XHTTP_DIRECT="${ENABLE_XHTTP_DIRECT}"
+SB_ENABLE_AWG="${ENABLE_AWG}"
 SB_REALITY_P4="${P_REALITY_V4}"
 SB_REALITY_P6="${P_REALITY_V6}"
 SB_HY2_P4="${P_HY2_V4}"
 SB_HY2_P6="${P_HY2_V6}"
 SB_TUIC_P4="${P_TUIC_V4}"
 SB_TUIC_P6="${P_TUIC_V6}"
+SB_XHTTP_DIRECT_P4="${P_XHTTP_DIRECT_V4}"
+SB_XHTTP_DIRECT_P6="${P_XHTTP_DIRECT_V6}"
+SB_AWG_P4="${P_AWG_V4}"
+SB_AWG_P6="${P_AWG_V6}"
+SB_AWG_SERVER_PRI="${AWG_SERVER_PRI:-}"
+SB_AWG_SERVER_PUB="${AWG_SERVER_PUB:-}"
+SB_AWG_CLIENT_PRI="${AWG_CLIENT_PRI:-}"
+SB_AWG_CLIENT_PUB="${AWG_CLIENT_PUB:-}"
+SB_AWG_PSK="${AWG_PSK:-}"
+SB_AWG_JC="${AWG_JC:-4}"
+SB_AWG_JMIN="${AWG_JMIN:-50}"
+SB_AWG_JMAX="${AWG_JMAX:-1000}"
+SB_AWG_S1="${AWG_S1:-15}"
+SB_AWG_S2="${AWG_S2:-20}"
+SB_AWG_H1="${AWG_H1:-1}"
+SB_AWG_H2="${AWG_H2:-2}"
+SB_AWG_H3="${AWG_H3:-3}"
+SB_AWG_H4="${AWG_H4:-4}"
 SB_HOP_RANGE="${HOP_RANGE}"
 SB_ENABLE_WARP="${ENABLE_WARP}"
 SB_ACME_MODE="${ACME_MODE:-}"
