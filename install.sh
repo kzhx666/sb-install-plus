@@ -1314,9 +1314,13 @@ YAML
     ip: "10.8.0.2"
     public-key: "${SB_AWG_SERVER_PUB}"
     private-key: "${SB_AWG_CLIENT_PRI}"
+    allowed-ips:
+      - 0.0.0.0/0
+      - "::/0"
+$([[ -n "${SB_AWG_PSK:-}" ]] && echo "    pre-shared-key: \"${SB_AWG_PSK}\"")
 $([[ -n "${SB_AWG_PSK:-}" ]] && echo "    preshared-key: \"${SB_AWG_PSK}\"")
     udp: true
-    remote-dns-resolve: true
+    remote-dns-resolve: false
     dns:
       - 1.1.1.1
       - 8.8.8.8
