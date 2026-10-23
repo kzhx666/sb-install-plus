@@ -2919,7 +2919,7 @@ status() {
       return 0
     fi
   fi
-  if pgrep -f "${INSTALL_PATH} run" >/dev/null 2>&1; then
+  if pidof sing-box >/dev/null 2>&1 || pgrep -f "${INSTALL_PATH}" >/dev/null 2>&1; then
     einfo "status: started"
     return 0
   fi
