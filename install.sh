@@ -378,7 +378,7 @@ EOF
     systemctl restart xray-argo >/dev/null 2>&1 || true
     sleep 1
     if systemctl is-active xray-argo >/dev/null 2>&1 || pgrep -f xray-argo >/dev/null 2>&1; then
-      ok "Xray xHTTP 伴侣守护进程已启动运行 (监听 127.0.0.1:${port})！"
+      ok "Xray xHTTP 伴侣守护进程已启动运行 (监听 127.0.0.1:${argo_port})！"
     else
       warn "Xray xHTTP 伴侣守护进程启动异常，状态如下:"
       systemctl status xray-argo --no-pager 2>&1 | head -n 10 || true
