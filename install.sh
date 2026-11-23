@@ -750,7 +750,7 @@ ARGO_WS_PATH="${SB_ARGO_PATH:-/argo}"
 [[ "$ARGO_WS_PATH" != /* ]] && ARGO_WS_PATH="/${ARGO_WS_PATH}"
 ARGO_WS_PATH_ENC="$(urlencode_path "$ARGO_WS_PATH")"
 
-# 收集所有协议节点链接
+# 收集所有协议节点链接 (推送顺序: TUIC 第一, Hysteria2 第二, 其余随后)
 MAIN_NODES_LIST=()
 for i in "${!HOSTS[@]}"; do
   H="${HOSTS[$i]}"
@@ -759,19 +759,19 @@ for i in "${!HOSTS[@]}"; do
   SUFFIX=""
   [[ -n "$LABEL" ]] && SUFFIX="_${LABEL}"
 
-  if [[ "${SB_ENABLE_REALITY:-0}" == "1" ]]; then
-    PORT="${SB_REALITY_P4}"
-    [[ "$LABEL" == "IPv6" ]] && PORT="${SB_REALITY_P6}"
-    LINK="vless://${SB_UUID}@${UHOST}:${PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${SB_REALITY_SNI}&fp=chrome&pbk=${SB_REALITY_PUB}&sid=${SB_SHORT_ID}&type=tcp&headerType=none#Reality${SUFFIX}"
-    MAIN_NODES_LIST+=("$LINK")
-  fi
-
   # 若配置了合法自有域名证书 (SB_CERT_INSECURE == 0)，则直接以域名作为节点地址，且无需跳过证书验证
   TLS_HOST="$UHOST"
   INSECURE_PARAM="&insecure=1&allowInsecure=1&allow_insecure=1&skip-cert-verify=1"
   if [[ "${SB_CERT_INSECURE:-1}" == "0" && -n "${SB_SNI_HOST:-}" ]]; then
     [[ "$LABEL" != "IPv6" ]] && TLS_HOST="${SB_SNI_HOST}"
     INSECURE_PARAM=""
+  fi
+
+  if [[ "${SB_ENABLE_TUIC:-0}" == "1" ]]; then
+    PORT="${SB_TUIC_P4}"
+    [[ "$LABEL" == "IPv6" ]] && PORT="${SB_TUIC_P6}"
+    LINK="tuic://${SB_TUIC_UUID}:${SB_TUIC_PASS}@${TLS_HOST}:${PORT}?congestion_control=bbr&alpn=h3&sni=${SB_SNI_HOST}${INSECURE_PARAM}&version=5&udp_relay_mode=native#TUIC${SUFFIX}"
+    MAIN_NODES_LIST+=("$LINK")
   fi
 
   if [[ "${SB_ENABLE_HY2:-0}" == "1" ]]; then
@@ -783,10 +783,10 @@ for i in "${!HOSTS[@]}"; do
     MAIN_NODES_LIST+=("$LINK")
   fi
 
-  if [[ "${SB_ENABLE_TUIC:-0}" == "1" ]]; then
-    PORT="${SB_TUIC_P4}"
-    [[ "$LABEL" == "IPv6" ]] && PORT="${SB_TUIC_P6}"
-    LINK="tuic://${SB_TUIC_UUID}:${SB_TUIC_PASS}@${TLS_HOST}:${PORT}?congestion_control=bbr&alpn=h3&sni=${SB_SNI_HOST}${INSECURE_PARAM}&version=5&udp_relay_mode=native#TUIC${SUFFIX}"
+  if [[ "${SB_ENABLE_REALITY:-0}" == "1" ]]; then
+    PORT="${SB_REALITY_P4}"
+    [[ "$LABEL" == "IPv6" ]] && PORT="${SB_REALITY_P6}"
+    LINK="vless://${SB_UUID}@${UHOST}:${PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${SB_REALITY_SNI}&fp=chrome&pbk=${SB_REALITY_PUB}&sid=${SB_SHORT_ID}&type=tcp&headerType=none#Reality${SUFFIX}"
     MAIN_NODES_LIST+=("$LINK")
   fi
 
