@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Sing-box 现代极速终极版 v7.0
-# 精简核心协议 (VLESS-Reality / Hysteria 2 / TUIC v5) + 智能伪装测速 + 极致网络提速
+# Sing-box 现代极速终极版 v7.1
+# 核心协议 (VLESS-Reality / Hysteria 2 / TUIC v5 / AnyTLS / Snell v6) + Argo 固定/临时隧道 + WARP 多模式
 # ==============================================================================
 
 set -u
@@ -28,6 +28,31 @@ STATE_FILE="/etc/sing-box/.sb_state"
 MIHOMO_FILE="/etc/sing-box/mihomo_proxies.yaml"
 HOP_SCRIPT="/usr/local/bin/sb-hop.sh"
 CHECK_SCRIPT="/usr/local/bin/sb-selfcheck.sh"
+ARGO_WATCH_SCRIPT="/usr/local/bin/sb-argo-watch.sh"
+ARGO_LOG_FILE="/var/log/cloudflared-argo.log"
+PENDING_PUSH_FILE="/etc/sing-box/.pending_push"
+
+ver_ge(){
+  local v1="${1#v}" v2="${2#v}"
+  v1="${v1%%-*}"; v2="${v2%%-*}"
+  local IFS=.
+  local a=($v1) b=($v2)
+  local i x y
+  for i in 0 1 2; do
+    x="${a[$i]:-0}"; y="${b[$i]:-0}"
+    x="${x//[^0-9]/}"; y="${y//[^0-9]/}"
+    x="${x:-0}"; y="${y:-0}"
+    if (( x > y )); then return 0; fi
+    if (( x < y )); then return 1; fi
+  done
+  return 0
+}
+
+get_sb_version(){
+  if [[ -x "$INSTALL_PATH" ]]; then
+    "$INSTALL_PATH" version 2>/dev/null | awk '/sing-box version/{print $3; exit}' || true
+  fi
+}
 
 # --- 常见优质真实 TLS 1.3 / H2 伪装域名候选池 ---
 REALITY_SNI_CANDIDATES=(
@@ -525,7 +550,7 @@ update_core(){
   if [[ -z "${SB_TAG:-}" || "$SB_TAG" == "null" ]]; then
     SB_TAG="$(curl -sI --connect-timeout 6 https://github.com/SagerNet/sing-box/releases/latest 2>/dev/null | grep -i '^location:' | grep -oE 'v[0-9]+\.[0-9]+(\.[0-9]+)?' | head -n1 || true)"
   fi
-  [[ -z "${SB_TAG:-}" ]] && SB_TAG="v1.12.12"
+  [[ -z "${SB_TAG:-}" ]] && SB_TAG="v1.14.4"
 
   SB_URL="https://github.com/SagerNet/sing-box/releases/download/${SB_TAG}/sing-box-${SB_TAG#v}-linux-${SB_ARCH}.tar.gz"
   info "正在下载 Sing-box 核心 $SB_TAG ($SB_ARCH)..."
@@ -631,10 +656,10 @@ do_uninstall(){
   fi
 
   # 清除所有二进制、脚本与快捷方式
-  rm -f "$HOP_SCRIPT" "$CHECK_SCRIPT" "$SHORTCUT_BIN" "$INSTALL_PATH" /usr/local/bin/cloudflared /usr/bin/cloudflared /usr/bin/sing-box >/dev/null 2>&1 || true
+  rm -f "$HOP_SCRIPT" "$CHECK_SCRIPT" "$ARGO_WATCH_SCRIPT" "$SHORTCUT_BIN" "$INSTALL_PATH" /usr/local/bin/cloudflared /usr/bin/cloudflared /usr/bin/sing-box >/dev/null 2>&1 || true
   
   # 清除配置、证书、状态、日志及临时文件
-  rm -rf "$CONF_DIR" /etc/cloudflared /var/log/sing-box* /tmp/sb* /tmp/sing-box* /tmp/cloudflared* >/dev/null 2>&1 || true
+  rm -rf "$CONF_DIR" /etc/cloudflared /var/log/sing-box* "$ARGO_LOG_FILE" /tmp/sb* /tmp/sing-box* /tmp/cloudflared* >/dev/null 2>&1 || true
   
   # 清理 Crontab 任务
   if command -v crontab >/dev/null 2>&1; then
@@ -689,6 +714,8 @@ RED="\033[31m"; GREEN="\033[32m"; YELLOW="\033[33m"; BLUE="\033[36m"; PURPLE="\0
 STATE="/etc/sing-box/.sb_state"
 MIHOMO_FILE="/etc/sing-box/mihomo_proxies.yaml"
 MGR_CONF="/etc/sing-box/.sb_mgr_conf"
+PENDING_PUSH="/etc/sing-box/.pending_push"
+warn(){ echo -e "${YELLOW}[WARN]${PLAIN} $*"; }
 
 if [[ ! -f "$STATE" ]]; then
   echo -e "${RED}[ERR] 未检测到配置，请先运行 install.sh 安装！${PLAIN}"
@@ -760,6 +787,20 @@ for i in "${!HOSTS[@]}"; do
     PORT="${SB_TUIC_P4}"
     [[ "$LABEL" == "IPv6" ]] && PORT="${SB_TUIC_P6}"
     LINK="tuic://${SB_TUIC_UUID}:${SB_TUIC_PASS}@${TLS_HOST}:${PORT}?congestion_control=bbr&alpn=h3&sni=${SB_SNI_HOST}${INSECURE_PARAM}&version=5&udp_relay_mode=native#TUIC${SUFFIX}"
+    MAIN_NODES_LIST+=("$LINK")
+  fi
+
+  if [[ "${SB_ENABLE_ANYTLS:-0}" == "1" ]]; then
+    PORT="${SB_ANYTLS_P4}"
+    [[ "$LABEL" == "IPv6" ]] && PORT="${SB_ANYTLS_P6}"
+    LINK="anytls://${SB_ANYTLS_PASS}@${TLS_HOST}:${PORT}?sni=${SB_SNI_HOST}&fp=chrome${INSECURE_PARAM}#AnyTLS${SUFFIX}"
+    MAIN_NODES_LIST+=("$LINK")
+  fi
+
+  if [[ "${SB_ENABLE_SNELL:-0}" == "1" ]]; then
+    PORT="${SB_SNELL_P4}"
+    [[ "$LABEL" == "IPv6" ]] && PORT="${SB_SNELL_P6}"
+    LINK="snell://${SB_SNELL_PSK}@${UHOST}:${PORT}?version=6&mode=${SB_SNELL_MODE:-default}#Snell${SUFFIX}"
     MAIN_NODES_LIST+=("$LINK")
   fi
 done
@@ -878,6 +919,30 @@ push_to_manager() {
 
   echo -e "\n${BLUE}正在连接面板并推送节点...${PLAIN}"
 
+  _post_with_retry() {
+    local url="$1" token="$2" payload="$3"
+    local attempt=1 max_attempts=3 delay=2 resp=""
+    while (( attempt <= max_attempts )); do
+      resp="$(curl -s -S -X POST "$url" \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer ${token}" \
+        --connect-timeout 10 \
+        --max-time 30 \
+        -d "$payload" 2>&1 || true)"
+      if echo "$resp" | grep -q '"status"[[:space:]]*:[[:space:]]*"success"'; then
+        echo "$resp"
+        return 0
+      fi
+      if (( attempt < max_attempts )); then
+        sleep "$delay"
+        delay=$((delay * 2))
+      fi
+      attempt=$((attempt + 1))
+    done
+    echo "$resp"
+    return 1
+  }
+
   PUSH_ERR=0
   ARGO_SYNC="false"
   [[ ${#MAIN_NODES_LIST[@]} -eq 0 ]] && ARGO_SYNC="true"
@@ -892,17 +957,10 @@ push_to_manager() {
       --argjson sync "$ARGO_SYNC" \
       '{tag: $tag, nodes: $nodes, enabled: true, token: $token, replace: true, sync: $sync}')"
 
-    RESP_A="$(curl -s -S -X POST "${MGR_URL}/api/push_nodes" \
-      -H "Content-Type: application/json" \
-      -H "Authorization: Bearer ${MGR_TOKEN}" \
-      --connect-timeout 10 \
-      --max-time 30 \
-      -d "$PAYLOAD_A" 2>&1)"
-
-    if echo "$RESP_A" | grep -q '"status"[[:space:]]*:[[:space:]]*"success"'; then
+    if RESP_A="$(_post_with_retry "${MGR_URL}/api/push_nodes" "$MGR_TOKEN" "$PAYLOAD_A")"; then
       echo -e "${GREEN}[√] Argo 隧道节点推送成功！${PLAIN}"
     else
-      echo -e "${RED}[×] Argo 节点推送失败！${PLAIN}"
+      echo -e "${RED}[×] Argo 节点推送失败 (已重试 3 次)！${PLAIN}"
       echo -e "${YELLOW}面板响应: ${RESP_A}${PLAIN}"
       PUSH_ERR=1
     fi
@@ -918,49 +976,52 @@ push_to_manager() {
       -d "$DEL_A_PAYLOAD" >/dev/null 2>&1 || true
   fi
 
-  # 2. 推送主节点集合 (Reality / Hy2 / TUIC 三合一，默认关闭优选，sync: true 触发全量同步)
+  # 2. 推送主节点集合 (默认关闭优选，sync: true 触发全量同步)
   if [[ ${#MAIN_NODES_LIST[@]} -gt 0 ]]; then
     MAIN_TEXT="$(printf "%s\n" "${MAIN_NODES_LIST[@]}")"
-    echo -e ">>> [2/2] 正在推送主节点集合 (Reality / Hy2 / TUIC) -> 订阅源: [${GREEN}${TAG_MAIN}${PLAIN}] (默认关闭优选)..."
+    echo -e ">>> [2/2] 正在推送主节点集合 -> 订阅源: [${GREEN}${TAG_MAIN}${PLAIN}] (默认关闭优选)..."
     PAYLOAD_M="$(jq -n \
       --arg tag "$TAG_MAIN" \
       --arg nodes "$MAIN_TEXT" \
       --arg token "$MGR_TOKEN" \
       '{tag: $tag, nodes: $nodes, enabled: false, token: $token, replace: true, sync: true}')"
 
-    RESP_M="$(curl -s -S -X POST "${MGR_URL}/api/push_nodes" \
-      -H "Content-Type: application/json" \
-      -H "Authorization: Bearer ${MGR_TOKEN}" \
-      --connect-timeout 10 \
-      --max-time 30 \
-      -d "$PAYLOAD_M" 2>&1)"
-
-    if echo "$RESP_M" | grep -q '"status"[[:space:]]*:[[:space:]]*"success"'; then
+    if RESP_M="$(_post_with_retry "${MGR_URL}/api/push_nodes" "$MGR_TOKEN" "$PAYLOAD_M")"; then
       echo -e "${GREEN}[√] 主节点集合推送成功！共 ${#MAIN_NODES_LIST[@]} 个节点。${PLAIN}"
     else
-      echo -e "${RED}[×] 主节点推送失败！${PLAIN}"
+      echo -e "${RED}[×] 主节点推送失败 (已重试 3 次)！${PLAIN}"
       echo -e "${YELLOW}面板响应: ${RESP_M}${PLAIN}"
       PUSH_ERR=1
     fi
   else
-    echo -e "${YELLOW}[!] 未启用 Reality / Hy2 / TUIC 协议节点，跳过主节点推送。${PLAIN}"
+    echo -e "${YELLOW}[!] 未启用主协议节点，跳过主节点推送。${PLAIN}"
   fi
 
-  if [[ $PUSH_ERR -eq 0 ]]; then
-    cat > "$MGR_CONF" <<EOF
+  cat > "$MGR_CONF" <<EOF
 SAVED_MGR_URL="${MGR_URL}"
 SAVED_MGR_TOKEN="${MGR_TOKEN}"
 SAVED_TAG_MAIN="${TAG_MAIN}"
 SAVED_TAG_ARGO="${TAG_ARGO}"
 EOF
-    chmod 600 "$MGR_CONF"
+  chmod 600 "$MGR_CONF"
+
+  if [[ $PUSH_ERR -eq 0 ]]; then
+    rm -f "$PENDING_PUSH" >/dev/null 2>&1 || true
+    echo "[PUSH_META] ok=1 argo_domain=${SB_ARGO_DOMAIN:-} main_count=${#MAIN_NODES_LIST[@]}"
     echo -e "\n${GREEN}==============================================================${PLAIN}"
     echo -e "${GREEN}🎉 节点已成功推送到节点管理平台！${PLAIN}"
     echo -e "管理面板地址: ${BLUE}${MGR_URL}${PLAIN}"
     echo -e "聚合订阅地址: ${BLUE}${MGR_URL}/sub?token=${MGR_TOKEN}${PLAIN}"
     echo -e "${GREEN}==============================================================${PLAIN}\n"
   else
-    echo -e "\n${RED}[!] 节点推送未完全成功，请检查上述面板响应！${PLAIN}\n"
+    date +%s > "$PENDING_PUSH" 2>/dev/null || true
+    if command -v crontab >/dev/null 2>&1; then
+      if ! crontab -l 2>/dev/null | grep -q '\.pending_push'; then
+        (crontab -l 2>/dev/null; echo "*/10 * * * * [ -f /etc/sing-box/.pending_push ] && AUTO_INSTALL=1 /usr/local/bin/sb push >/dev/null 2>&1") | crontab - 2>/dev/null || true
+      fi
+    fi
+    echo "[PUSH_META] ok=0 argo_domain=${SB_ARGO_DOMAIN:-} main_count=${#MAIN_NODES_LIST[@]}"
+    echo -e "\n${RED}[!] 节点推送未完全成功，已写入待补推队列 (${PENDING_PUSH})，稍后将自动重试！${PLAIN}\n"
     return 1
   fi
 }
@@ -973,7 +1034,7 @@ fi
 
 # 默认模式：展示所有节点链接与 Mihomo 配置
 echo -e "${BLUE}==============================================================${PLAIN}"
-echo -e "${BLUE}         Sing-box 极速节点输出 (VLESS-Reality / Hy2 / TUIC)   ${PLAIN}"
+echo -e "${BLUE}   Sing-box 极速节点输出 (Reality / Hy2 / TUIC / AnyTLS / Snell) ${PLAIN}"
 echo -e "${BLUE}==============================================================${PLAIN}"
 
 for i in "${!HOSTS[@]}"; do
@@ -1017,6 +1078,26 @@ for i in "${!HOSTS[@]}"; do
       INSECURE_PARAM=""
     fi
     LINK="tuic://${SB_TUIC_UUID}:${SB_TUIC_PASS}@${TLS_HOST}:${PORT}?congestion_control=bbr&alpn=h3&sni=${SB_SNI_HOST}${INSECURE_PARAM}&version=5&udp_relay_mode=native#TUIC${SUFFIX}"
+    echo -e "${GREEN}${LINK}${PLAIN}"
+  fi
+
+  if [[ "${SB_ENABLE_ANYTLS:-0}" == "1" ]]; then
+    PORT="${SB_ANYTLS_P4}"
+    [[ "$LABEL" == "IPv6" ]] && PORT="${SB_ANYTLS_P6}"
+    TLS_HOST="$UHOST"
+    INSECURE_PARAM="&insecure=1&allowInsecure=1&allow_insecure=1&skip-cert-verify=1"
+    if [[ "${SB_CERT_INSECURE:-1}" == "0" && -n "${SB_SNI_HOST:-}" ]]; then
+      [[ "$LABEL" != "IPv6" ]] && TLS_HOST="${SB_SNI_HOST}"
+      INSECURE_PARAM=""
+    fi
+    LINK="anytls://${SB_ANYTLS_PASS}@${TLS_HOST}:${PORT}?sni=${SB_SNI_HOST}&fp=chrome${INSECURE_PARAM}#AnyTLS${SUFFIX}"
+    echo -e "${GREEN}${LINK}${PLAIN}"
+  fi
+
+  if [[ "${SB_ENABLE_SNELL:-0}" == "1" ]]; then
+    PORT="${SB_SNELL_P4}"
+    [[ "$LABEL" == "IPv6" ]] && PORT="${SB_SNELL_P6}"
+    LINK="snell://${SB_SNELL_PSK}@${UHOST}:${PORT}?version=6&mode=${SB_SNELL_MODE:-default}#Snell${SUFFIX}"
     echo -e "${GREEN}${LINK}${PLAIN}"
   fi
 done
@@ -1096,6 +1177,37 @@ YAML
     skip-cert-verify: ${SKIP_CERT_YAML}
     congestion-controller: bbr
     reduce-rtt: true
+YAML
+    fi
+
+    if [[ "${SB_ENABLE_ANYTLS:-0}" == "1" ]]; then
+      PORT="${SB_ANYTLS_P4}"
+      [[ "$LABEL" == "IPv6" ]] && PORT="${SB_ANYTLS_P6}"
+      cat <<YAML
+  - name: "AnyTLS${SUFFIX}"
+    type: anytls
+    server: "${TLS_YAML_HOST}"
+    port: ${PORT}
+    password: "${SB_ANYTLS_PASS}"
+    client-fingerprint: chrome
+    sni: "${SB_SNI_HOST}"
+    skip-cert-verify: ${SKIP_CERT_YAML}
+    udp: true
+YAML
+    fi
+
+    if [[ "${SB_ENABLE_SNELL:-0}" == "1" ]]; then
+      PORT="${SB_SNELL_P4}"
+      [[ "$LABEL" == "IPv6" ]] && PORT="${SB_SNELL_P6}"
+      cat <<YAML
+  - name: "Snell${SUFFIX}"
+    type: snell
+    server: "${H}"
+    port: ${PORT}
+    psk: "${SB_SNELL_PSK}"
+    version: 6
+    mode: "${SB_SNELL_MODE:-default}"
+    udp: true
 YAML
     fi
   done
@@ -1285,6 +1397,8 @@ fi
 # 暂存外部传入的环境变量 (自动化部署模式具有最高优先级，防止被旧的 STATE_FILE 覆盖)
 _EXT_AUTO_INSTALL="${AUTO_INSTALL:-0}"
 _EXT_ARGO_DISABLE="${SB_ARGO_DISABLE:-0}"
+_EXT_ARGO_MODE="${SB_ARGO_MODE:-${ARGO_MODE:-}}"
+_EXT_ARGO_PROTOCOL="${SB_ARGO_PROTOCOL:-${ARGO_PROTOCOL:-}}"
 _EXT_ARGO_TOKEN="${SB_ARGO_TOKEN:-${ARGO_TOKEN:-}}"
 _EXT_ARGO_DOMAIN="${SB_ARGO_DOMAIN:-${ARGO_DOMAIN:-}}"
 _EXT_ARGO_PATH="${SB_ARGO_PATH:-${ARGO_PATH:-}}"
@@ -1296,6 +1410,12 @@ _EXT_INPUT_DOMAIN="${INPUT_DOMAIN:-${DOMAIN:-}}"
 _EXT_ENABLE_REALITY="${SB_ENABLE_REALITY:-}"
 _EXT_ENABLE_HY2="${SB_ENABLE_HY2:-}"
 _EXT_ENABLE_TUIC="${SB_ENABLE_TUIC:-}"
+_EXT_ENABLE_ANYTLS="${SB_ENABLE_ANYTLS:-}"
+_EXT_ENABLE_SNELL="${SB_ENABLE_SNELL:-}"
+_EXT_SNELL_MODE="${SB_SNELL_MODE:-}"
+_EXT_SNELL_PSK="${SB_SNELL_PSK:-}"
+_EXT_ENABLE_WARP="${SB_ENABLE_WARP:-}"
+_EXT_WARP_MODE="${SB_WARP_MODE:-}"
 _EXT_HOP_RANGE="${SB_HOP_RANGE:-}"
 _EXT_OUT_MODE="${SB_OUT_MODE:-${OUT_MODE:-}}"
 
@@ -1308,12 +1428,15 @@ fi
 # 若为自动化部署模式，强制以外部传入的参数覆盖旧配置
 if [[ "${_EXT_AUTO_INSTALL}" -eq 1 || "${1:-}" == "--auto" || "${1:-}" == "auto" ]]; then
   if [[ "${_EXT_ARGO_DISABLE}" == "1" ]]; then
+    SB_ARGO_MODE="off"
     SB_ARGO_TOKEN=""
     SB_ARGO_DOMAIN=""
   else
+    [[ -n "$_EXT_ARGO_MODE" ]] && SB_ARGO_MODE="$_EXT_ARGO_MODE"
     [[ -n "$_EXT_ARGO_TOKEN" ]] && SB_ARGO_TOKEN="$_EXT_ARGO_TOKEN"
     [[ -n "$_EXT_ARGO_DOMAIN" ]] && SB_ARGO_DOMAIN="$_EXT_ARGO_DOMAIN"
   fi
+  [[ -n "$_EXT_ARGO_PROTOCOL" ]] && SB_ARGO_PROTOCOL="$_EXT_ARGO_PROTOCOL"
   [[ -n "$_EXT_ARGO_PATH" ]] && SB_ARGO_PATH="$_EXT_ARGO_PATH"
   [[ -n "$_EXT_CF_TOKEN" ]] && SB_CF_TOKEN="$_EXT_CF_TOKEN"
   [[ -n "$_EXT_ACME_MODE" ]] && SB_ACME_MODE="$_EXT_ACME_MODE"
@@ -1323,6 +1446,12 @@ if [[ "${_EXT_AUTO_INSTALL}" -eq 1 || "${1:-}" == "--auto" || "${1:-}" == "auto"
   [[ -n "$_EXT_ENABLE_REALITY" ]] && SB_ENABLE_REALITY="$_EXT_ENABLE_REALITY"
   [[ -n "$_EXT_ENABLE_HY2" ]] && SB_ENABLE_HY2="$_EXT_ENABLE_HY2"
   [[ -n "$_EXT_ENABLE_TUIC" ]] && SB_ENABLE_TUIC="$_EXT_ENABLE_TUIC"
+  [[ -n "$_EXT_ENABLE_ANYTLS" ]] && SB_ENABLE_ANYTLS="$_EXT_ENABLE_ANYTLS"
+  [[ -n "$_EXT_ENABLE_SNELL" ]] && SB_ENABLE_SNELL="$_EXT_ENABLE_SNELL"
+  [[ -n "$_EXT_SNELL_MODE" ]] && SB_SNELL_MODE="$_EXT_SNELL_MODE"
+  [[ -n "$_EXT_SNELL_PSK" ]] && SB_SNELL_PSK="$_EXT_SNELL_PSK"
+  [[ -n "$_EXT_ENABLE_WARP" ]] && SB_ENABLE_WARP="$_EXT_ENABLE_WARP"
+  [[ -n "$_EXT_WARP_MODE" ]] && SB_WARP_MODE="$_EXT_WARP_MODE"
   [[ -n "$_EXT_HOP_RANGE" ]] && SB_HOP_RANGE="$_EXT_HOP_RANGE"
   [[ -n "$_EXT_OUT_MODE" ]] && SB_OUT_MODE="$_EXT_OUT_MODE"
 fi
@@ -1383,18 +1512,23 @@ fi
 ok "已选定节点网络输出模式：${OUT_MODE}"
 
 # ==============================================================================
-# [3/10] 核心协议交互式选择 (VLESS-Reality / Hysteria 2 / TUIC v5)
+# [3/10] 核心协议交互式选择 (Reality / Hy2 / TUIC v5 / AnyTLS / Snell v6)
 # ==============================================================================
-echo -e "\n${YELLOW}[3/10] 核心协议选择 (精简三大王牌协议，默认全开)...${PLAIN}"
+echo -e "\n${YELLOW}[3/10] 核心协议选择...${PLAIN}"
 echo -e "--------------------------------------------------------------"
 
 ENABLE_REALITY=1
 ENABLE_HY2=1
 ENABLE_TUIC=1
+ENABLE_ANYTLS=0
+ENABLE_SNELL=0
+SNELL_MODE="${SB_SNELL_MODE:-default}"
 if [[ "${AUTO_INSTALL:-0}" -eq 1 ]]; then
   ENABLE_REALITY="${SB_ENABLE_REALITY:-1}"
   ENABLE_HY2="${SB_ENABLE_HY2:-1}"
   ENABLE_TUIC="${SB_ENABLE_TUIC:-1}"
+  ENABLE_ANYTLS="${SB_ENABLE_ANYTLS:-0}"
+  ENABLE_SNELL="${SB_ENABLE_SNELL:-0}"
 else
   read -r -p "是否启用 VLESS-Reality (TCP 顶流、免证书、抗封锁) [Y/n] (默认 Y): " ANS_R || true
   [[ "$ANS_R" =~ ^[Nn]$ ]] && ENABLE_REALITY=0
@@ -1404,9 +1538,32 @@ else
 
   read -r -p "是否启用 TUIC v5 (QUIC 低延迟、高速备用栈) [Y/n] (默认 Y): " ANS_T || true
   [[ "$ANS_T" =~ ^[Nn]$ ]] && ENABLE_TUIC=0
+
+  read -r -p "是否启用 AnyTLS (Sing-box 1.12+ 原生抗特征 TLS 协议) [y/N] (默认 N): " ANS_A || true
+  [[ "$ANS_A" =~ ^[Yy]$ ]] && ENABLE_ANYTLS=1
+
+  read -r -p "是否启用 Snell v6 (Sing-box 1.14+ 原生支持，适配 Surge/Mihomo) [y/N] (默认 N): " ANS_S || true
+  if [[ "$ANS_S" =~ ^[Yy]$ ]]; then
+    ENABLE_SNELL=1
+    echo -e "请选择 Snell v6 流量整形模式 (mode):"
+    echo -e "  1) default (默认推荐)"
+    echo -e "  2) unshaped (不整形)"
+    echo -e "  3) unsafe-raw (原始模式)"
+    read -r -p "请选择 [1-3] (默认 1): " ANS_SM || true
+    case "${ANS_SM:-1}" in
+      2) SNELL_MODE="unshaped" ;;
+      3) SNELL_MODE="unsafe-raw" ;;
+      *) SNELL_MODE="default" ;;
+    esac
+  fi
 fi
 
-if [[ "$ENABLE_REALITY" -eq 0 && "$ENABLE_HY2" -eq 0 && "$ENABLE_TUIC" -eq 0 ]]; then
+case "$SNELL_MODE" in
+  default|unshaped|unsafe-raw) ;;
+  *) SNELL_MODE="default" ;;
+esac
+
+if [[ "$ENABLE_REALITY" -eq 0 && "$ENABLE_HY2" -eq 0 && "$ENABLE_TUIC" -eq 0 && "$ENABLE_ANYTLS" -eq 0 && "$ENABLE_SNELL" -eq 0 ]]; then
   warn "未启用任何协议，默认强制启用 VLESS-Reality + Hysteria 2 + TUIC v5！"
   ENABLE_REALITY=1
   ENABLE_HY2=1
@@ -1417,19 +1574,21 @@ echo -e "已选定协议组合："
 [[ "$ENABLE_REALITY" -eq 1 ]] && echo -e "  - ${GREEN}VLESS-Reality${PLAIN} (TCP)"
 [[ "$ENABLE_HY2" -eq 1 ]] && echo -e "  - ${GREEN}Hysteria 2${PLAIN} (UDP)"
 [[ "$ENABLE_TUIC" -eq 1 ]] && echo -e "  - ${GREEN}TUIC v5${PLAIN} (UDP)"
+[[ "$ENABLE_ANYTLS" -eq 1 ]] && echo -e "  - ${GREEN}AnyTLS${PLAIN} (TCP)"
+[[ "$ENABLE_SNELL" -eq 1 ]] && echo -e "  - ${GREEN}Snell v6${PLAIN} (TCP+UDP, mode=${SNELL_MODE})"
 echo -e "--------------------------------------------------------------"
 
 # ==============================================================================
 # [4/10] 端口与端口跳跃交互配置
 # ==============================================================================
 echo -e "${YELLOW}[4/10] 端口分配与跳跃设置...${PLAIN}"
-PROTO_COUNT=$((ENABLE_REALITY + ENABLE_HY2 + ENABLE_TUIC))
+PROTO_COUNT=$((ENABLE_REALITY + ENABLE_HY2 + ENABLE_TUIC + ENABLE_ANYTLS + ENABLE_SNELL))
 TOTAL_PORTS=$PROTO_COUNT
 [[ "$OUT_MODE" == "both" ]] && TOTAL_PORTS=$((PROTO_COUNT * 2))
 
 if [[ "${AUTO_INSTALL:-0}" -eq 1 ]]; then
   # 自动部署模式
-  if [[ -n "${PORT_REALITY:-}" || -n "${PORT_HY2:-}" || -n "${PORT_TUIC:-}" ]]; then
+  if [[ -n "${PORT_REALITY:-}" || -n "${PORT_HY2:-}" || -n "${PORT_TUIC:-}" || -n "${PORT_ANYTLS:-}" || -n "${PORT_SNELL:-}" ]]; then
     # 直接使用显式指定的端口 (如 NAT 受限端口分配)
     P_REALITY_V4="${PORT_REALITY:-0}"
     P_REALITY_V6="${PORT_REALITY:-0}"
@@ -1437,6 +1596,10 @@ if [[ "${AUTO_INSTALL:-0}" -eq 1 ]]; then
     P_HY2_V6="${PORT_HY2:-0}"
     P_TUIC_V4="${PORT_TUIC:-0}"
     P_TUIC_V6="${PORT_TUIC:-0}"
+    P_ANYTLS_V4="${PORT_ANYTLS:-0}"
+    P_ANYTLS_V6="${PORT_ANYTLS:-0}"
+    P_SNELL_V4="${PORT_SNELL:-0}"
+    P_SNELL_V6="${PORT_SNELL:-0}"
     HOP_RANGE="${SB_HOP_RANGE:-${HOP_RANGE:-}}"
   else
     BASE_PORT="${BASE_PORT:-}"
@@ -1449,6 +1612,8 @@ if [[ "${AUTO_INSTALL:-0}" -eq 1 ]]; then
     P_REALITY_V4=0; P_REALITY_V6=0
     P_HY2_V4=0; P_HY2_V6=0
     P_TUIC_V4=0; P_TUIC_V6=0
+    P_ANYTLS_V4=0; P_ANYTLS_V6=0
+    P_SNELL_V4=0; P_SNELL_V6=0
     if [[ "$ENABLE_REALITY" -eq 1 ]]; then
       P_REALITY_V4=$((BASE_V4 + cur_offset))
       P_REALITY_V6=$((BASE_V6 + cur_offset))
@@ -1462,6 +1627,16 @@ if [[ "${AUTO_INSTALL:-0}" -eq 1 ]]; then
     if [[ "$ENABLE_TUIC" -eq 1 ]]; then
       P_TUIC_V4=$((BASE_V4 + cur_offset))
       P_TUIC_V6=$((BASE_V6 + cur_offset))
+      cur_offset=$((cur_offset + 1))
+    fi
+    if [[ "$ENABLE_ANYTLS" -eq 1 ]]; then
+      P_ANYTLS_V4=$((BASE_V4 + cur_offset))
+      P_ANYTLS_V6=$((BASE_V6 + cur_offset))
+      cur_offset=$((cur_offset + 1))
+    fi
+    if [[ "$ENABLE_SNELL" -eq 1 ]]; then
+      P_SNELL_V4=$((BASE_V4 + cur_offset))
+      P_SNELL_V6=$((BASE_V6 + cur_offset))
       cur_offset=$((cur_offset + 1))
     fi
     HOP_RANGE="${SB_HOP_RANGE:-${HOP_RANGE:-30000-32000}}"
@@ -1480,6 +1655,8 @@ else
   P_REALITY_V4=0; P_REALITY_V6=0
   P_HY2_V4=0; P_HY2_V6=0
   P_TUIC_V4=0; P_TUIC_V6=0
+  P_ANYTLS_V4=0; P_ANYTLS_V6=0
+  P_SNELL_V4=0; P_SNELL_V6=0
 
   if [[ "$ENABLE_REALITY" -eq 1 ]]; then
     P_REALITY_V4=$((BASE_V4 + cur_offset))
@@ -1496,12 +1673,24 @@ else
     P_TUIC_V6=$((BASE_V6 + cur_offset))
     cur_offset=$((cur_offset + 1))
   fi
+  if [[ "$ENABLE_ANYTLS" -eq 1 ]]; then
+    P_ANYTLS_V4=$((BASE_V4 + cur_offset))
+    P_ANYTLS_V6=$((BASE_V6 + cur_offset))
+    cur_offset=$((cur_offset + 1))
+  fi
+  if [[ "$ENABLE_SNELL" -eq 1 ]]; then
+    P_SNELL_V4=$((BASE_V4 + cur_offset))
+    P_SNELL_V6=$((BASE_V6 + cur_offset))
+    cur_offset=$((cur_offset + 1))
+  fi
 fi
 
 echo -e ">>> 端口规划完成:"
 [[ "$ENABLE_REALITY" -eq 1 ]] && echo -e "  Reality 端口: ${GREEN}${P_REALITY_V4}${PLAIN} $([[ "$OUT_MODE" == "both" ]] && echo "(v6: ${P_REALITY_V6})")"
 [[ "$ENABLE_HY2" -eq 1 ]] && echo -e "  Hy2 端口    : ${GREEN}${P_HY2_V4}${PLAIN} $([[ "$OUT_MODE" == "both" ]] && echo "(v6: ${P_HY2_V6})")"
 [[ "$ENABLE_TUIC" -eq 1 ]] && echo -e "  TUIC 端口   : ${GREEN}${P_TUIC_V4}${PLAIN} $([[ "$OUT_MODE" == "both" ]] && echo "(v6: ${P_TUIC_V6})")"
+[[ "$ENABLE_ANYTLS" -eq 1 ]] && echo -e "  AnyTLS 端口 : ${GREEN}${P_ANYTLS_V4}${PLAIN} $([[ "$OUT_MODE" == "both" ]] && echo "(v6: ${P_ANYTLS_V6})")"
+[[ "$ENABLE_SNELL" -eq 1 ]] && echo -e "  Snell 端口  : ${GREEN}${P_SNELL_V4}${PLAIN} $([[ "$OUT_MODE" == "both" ]] && echo "(v6: ${P_SNELL_V6})")"
 
 # Hysteria 2 端口跳跃交互
 HOP_RANGE="${HOP_RANGE:-}"
@@ -1567,10 +1756,10 @@ CERT_INSECURE=1
 CERT_PATH="$CERT_DIR/cert.pem"
 KEY_PATH="$CERT_DIR/key.pem"
 
-# Hy2 或 TUIC 需要 TLS 证书
-if [[ "$ENABLE_HY2" -eq 1 || "$ENABLE_TUIC" -eq 1 ]]; then
+# Hy2 / TUIC / AnyTLS 需要 TLS 证书
+if [[ "$ENABLE_HY2" -eq 1 || "$ENABLE_TUIC" -eq 1 || "$ENABLE_ANYTLS" -eq 1 ]]; then
   echo -e "--------------------------------------------------------------"
-  echo -e "Hysteria 2 / TUIC v5 证书模式："
+  echo -e "Hysteria 2 / TUIC v5 / AnyTLS 证书模式："
   echo -e "  1. 快速免域名自签证书 (10年有效，随机伪装 SNI=${SNI_HOST}，客户端自动开启跳过证书校验)"
   echo -e "  2. 使用自有域名 (通过 acme.sh 自动申请免费 Let's Encrypt 证书)"
   if [[ "${AUTO_INSTALL:-0}" -eq 1 ]]; then
@@ -1714,14 +1903,34 @@ fi
 # [6/10] Cloudflare WARP 智能分流设置
 # ==============================================================================
 echo -e "\n${YELLOW}[6/10] Cloudflare WARP 智能分流设置...${PLAIN}"
-echo -e "说明：开启后仅将 ChatGPT、Claude、Gemini、Netflix 等 AI 与流媒体域名走 WARP 出口，解锁风控，其他流量保持 VPS 原生千兆直连！"
+echo -e "说明：支持 AI/流媒体分流 (ai)、仅 IPv4 出站 (v4)、仅 IPv6 出站 (v6) 或全局 WARP (all)。"
 ENABLE_WARP=0
+WARP_MODE="${_EXT_WARP_MODE:-${SB_WARP_MODE:-ai}}"
 if [[ "${AUTO_INSTALL:-0}" -eq 1 ]]; then
   ENABLE_WARP="${SB_ENABLE_WARP:-${ENABLE_WARP:-0}}"
 else
-  read -r -p "是否启用 WARP 智能分流? [y/N] (默认 N): " ANS_WARP || true
-  [[ "$ANS_WARP" =~ ^[Yy]$ ]] && ENABLE_WARP=1
+  read -r -p "是否启用 WARP 分流? [y/N] (默认 N): " ANS_WARP || true
+  if [[ "$ANS_WARP" =~ ^[Yy]$ ]]; then
+    ENABLE_WARP=1
+    echo -e "请选择 WARP 接管模式："
+    echo -e "  1) ai  - 仅 AI 与流媒体域名走 WARP (默认推荐)"
+    echo -e "  2) v4  - 所有 IPv4 出站走 WARP (纯 IPv6 VPS 补全 IPv4 推荐)"
+    echo -e "  3) v6  - 所有 IPv6 出站走 WARP"
+    echo -e "  4) all - 全局流量走 WARP"
+    read -r -p "请选择 [1-4] (默认 1): " ANS_WM || true
+    case "${ANS_WM:-1}" in
+      2) WARP_MODE="v4" ;;
+      3) WARP_MODE="v6" ;;
+      4) WARP_MODE="all" ;;
+      *) WARP_MODE="ai" ;;
+    esac
+  fi
 fi
+
+case "$WARP_MODE" in
+  ai|v4|v6|all) ;;
+  *) WARP_MODE="ai" ;;
+esac
 
 WARP_CFG_READY=0
 WARP_PRIV=""
@@ -1729,17 +1938,22 @@ WARP_PUB="bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo="
 WARP_V4="172.16.0.2"
 WARP_V6=""
 WARP_RESERVED="[0,0,0]"
-WARP_EP="162.159.192.1"
+if [[ "$OUT_MODE" == "ipv6" || "$HAS_V4" -ne 1 ]]; then
+  WARP_EP="2606:4700:d0::a29f:c001"
+else
+  WARP_EP="162.159.192.1"
+fi
 WARP_EP_PORT=2408
 
 if [[ "$ENABLE_WARP" -eq 1 ]]; then
-  info "正在检测/注册 Cloudflare WARP 凭据..."
+  info "正在检测/注册 Cloudflare WARP 凭据 (Endpoint: ${WARP_EP}, 模式: ${WARP_MODE})..."
   # 如果已有旧配置则复用
   if [[ -f "$CONF_DIR/warp/warp.json" ]] && jq -e . "$CONF_DIR/warp/warp.json" >/dev/null 2>&1; then
-    WARP_PRIV="$(jq -r .private_key "$CONF_DIR/warp/warp.json")"
-    WARP_V4="$(jq -r .v4 "$CONF_DIR/warp/warp.json")"
-    WARP_V6="$(jq -r .v6 "$CONF_DIR/warp/warp.json")"
-    WARP_RESERVED="$(jq -r .reserved "$CONF_DIR/warp/warp.json")"
+    WARP_PRIV="$(jq -r '.private_key // empty' "$CONF_DIR/warp/warp.json")"
+    WARP_V4="$(jq -r '.v4 // "172.16.0.2"' "$CONF_DIR/warp/warp.json")"
+    WARP_V6="$(jq -r '.v6 // empty' "$CONF_DIR/warp/warp.json")"
+    [[ "$WARP_V6" == "null" ]] && WARP_V6=""
+    WARP_RESERVED="$(jq -r '.reserved // "[0,0,0]"' "$CONF_DIR/warp/warp.json")"
     WARP_CFG_READY=1
     ok "检测到现有 WARP 凭据，已直接复用"
   else
@@ -1754,9 +1968,10 @@ if [[ "$ENABLE_WARP" -eq 1 ]]; then
 
       if echo "$REG_RES" | grep -q "config"; then
         WARP_PRIV="$TMP_KEY"
-        WARP_V4="$(echo "$REG_RES" | jq -r .result.config.interface.addresses.v4 2>/dev/null || echo "172.16.0.2")"
-        WARP_V6="$(echo "$REG_RES" | jq -r .result.config.interface.addresses.v6 2>/dev/null || echo "")"
-        cid="$(echo "$REG_RES" | jq -r .result.config.client_id 2>/dev/null || true)"
+        WARP_V4="$(echo "$REG_RES" | jq -r '.result.config.interface.addresses.v4 // "172.16.0.2"' 2>/dev/null || echo "172.16.0.2")"
+        WARP_V6="$(echo "$REG_RES" | jq -r '.result.config.interface.addresses.v6 // empty' 2>/dev/null || echo "")"
+        [[ "$WARP_V6" == "null" ]] && WARP_V6=""
+        cid="$(echo "$REG_RES" | jq -r '.result.config.client_id // empty' 2>/dev/null || true)"
         if [[ -n "$cid" && "$cid" != "null" ]]; then
           # 解析保留字段
           r1=$(echo "$cid" | base64 -d 2>/dev/null | od -An -tu1 2>/dev/null | awk '{print $1,$2,$3}' || echo "0 0 0")
@@ -1785,17 +2000,40 @@ else
 fi
 
 # ==============================================================================
-# [6.5/10] Cloudflare Argo 隧道设置 (可选)
+# [6.5/10] Cloudflare Argo 隧道设置 (固定隧道 / 临时隧道 Quick Tunnel)
 # ==============================================================================
 echo -e "\n${YELLOW}[6.5/10] Cloudflare Argo 隧道设置 (免开端口 / CDN 穿透)...${PLAIN}"
-echo -e "说明：如使用 Cloudflare Tunnel，可输入 Token 和已在 CF 绑定的域名；不需要请直接回车跳过。"
+echo -e "说明：支持固定隧道 (Token+域名) 与临时隧道 (Quick Tunnel 免Token自动生成 trycloudflare.com)。"
 ARGO_PORT=10086
+ARGO_MODE="${_EXT_ARGO_MODE:-${SB_ARGO_MODE:-}}"
+ARGO_PROTOCOL="${_EXT_ARGO_PROTOCOL:-${SB_ARGO_PROTOCOL:-http2}}"
+case "$ARGO_PROTOCOL" in
+  http2|quic|auto) ;;
+  *) ARGO_PROTOCOL="http2" ;;
+esac
 
 if [[ "${AUTO_INSTALL:-0}" -eq 1 ]]; then
-  # 自动部署模式：优先使用外部传入的 Argo Token 和域名
-  ARGO_TOKEN="${_EXT_ARGO_TOKEN:-${SB_ARGO_TOKEN:-}}"
-  ARGO_DOMAIN="${_EXT_ARGO_DOMAIN:-${SB_ARGO_DOMAIN:-}}"
-  [[ -z "$ARGO_DOMAIN" ]] && ARGO_TOKEN=""
+  if [[ "${_EXT_ARGO_DISABLE:-0}" == "1" || "$ARGO_MODE" == "off" ]]; then
+    ARGO_MODE="off"
+    ARGO_TOKEN=""
+    ARGO_DOMAIN=""
+  elif [[ "$ARGO_MODE" == "quick" ]]; then
+    ARGO_MODE="quick"
+    ARGO_TOKEN=""
+    ARGO_DOMAIN=""
+  else
+    ARGO_TOKEN="${_EXT_ARGO_TOKEN:-${SB_ARGO_TOKEN:-}}"
+    ARGO_DOMAIN="${_EXT_ARGO_DOMAIN:-${SB_ARGO_DOMAIN:-}}"
+    if [[ -n "$ARGO_TOKEN" && -n "$ARGO_DOMAIN" ]]; then
+      ARGO_MODE="fixed"
+    elif [[ -z "$ARGO_TOKEN" && "$ARGO_MODE" == "quick" ]]; then
+      ARGO_MODE="quick"
+    else
+      ARGO_MODE="off"
+      ARGO_TOKEN=""
+      ARGO_DOMAIN=""
+    fi
+  fi
 else
   ARGO_TOKEN=""
   ARGO_DOMAIN=""
@@ -1804,32 +2042,73 @@ else
     source "$STATE_FILE" >/dev/null 2>&1 || true
     ARGO_TOKEN="${SB_ARGO_TOKEN:-}"
     ARGO_DOMAIN="${SB_ARGO_DOMAIN:-}"
+    [[ -z "$ARGO_MODE" ]] && ARGO_MODE="${SB_ARGO_MODE:-}"
+    [[ -n "${SB_ARGO_PROTOCOL:-}" ]] && ARGO_PROTOCOL="${SB_ARGO_PROTOCOL}"
   fi
-  if [[ -n "${ARGO_TOKEN:-}" && -n "${ARGO_DOMAIN:-}" ]]; then
-  echo -e "检测到现有 Argo 隧道配置 (域名: ${GREEN}${ARGO_DOMAIN}${PLAIN})"
-  read -r -p "是否保留此 Argo 隧道? [Y/n/修改] (默认 Y): " REUSE_ARGO || true
-  if [[ "$REUSE_ARGO" =~ ^[Nn]$ ]]; then
-    ARGO_TOKEN=""
-    ARGO_DOMAIN=""
-    info "已关闭 Argo 隧道"
-  elif [[ "$REUSE_ARGO" =~ ^[CcMm]$ ]]; then
-    read -r -p "请输入新的 Cloudflare Argo Token: " INPUT_ARGO_TOKEN || true
-    read -r -p "请输入新的绑定的 Argo 域名: " INPUT_ARGO_DOMAIN || true
-    ARGO_TOKEN="$INPUT_ARGO_TOKEN"
-    ARGO_DOMAIN="$INPUT_ARGO_DOMAIN"
-    [[ -z "$ARGO_DOMAIN" ]] && ARGO_TOKEN=""
-  else
-    ok "已保留现有 Argo 隧道: ${ARGO_DOMAIN}"
+  if [[ "$ARGO_MODE" == "quick" ]] || [[ -n "${ARGO_TOKEN:-}" && -n "${ARGO_DOMAIN:-}" ]]; then
+    echo -e "检测到现有 Argo 隧道配置 (模式: ${GREEN}${ARGO_MODE:-fixed}${PLAIN}, 域名: ${GREEN}${ARGO_DOMAIN:-自动生成}${PLAIN}, 协议: ${GREEN}${ARGO_PROTOCOL}${PLAIN})"
+    read -r -p "是否保留此 Argo 隧道? [Y/n/修改] (默认 Y): " REUSE_ARGO || true
+    if [[ "$REUSE_ARGO" =~ ^[Nn]$ ]]; then
+      ARGO_MODE="off"
+      ARGO_TOKEN=""
+      ARGO_DOMAIN=""
+      info "已关闭 Argo 隧道"
+    elif [[ "$REUSE_ARGO" =~ ^[CcMm]$ ]]; then
+      ARGO_MODE=""
+      ARGO_TOKEN=""
+      ARGO_DOMAIN=""
+    else
+      [[ -z "$ARGO_MODE" ]] && ARGO_MODE="fixed"
+      ok "已保留现有 Argo 隧道 (${ARGO_MODE})"
+    fi
   fi
-else
-  read -r -p "Cloudflare Argo Token (直接回车跳过): " INPUT_ARGO_TOKEN || true
-  if [[ -n "${INPUT_ARGO_TOKEN:-}" ]]; then
-    ARGO_TOKEN="$INPUT_ARGO_TOKEN"
-    read -r -p "请输入绑定的 Argo 域名: " INPUT_ARGO_DOMAIN || true
-    ARGO_DOMAIN="$INPUT_ARGO_DOMAIN"
-    [[ -z "$ARGO_DOMAIN" ]] && ARGO_TOKEN=""
+
+  if [[ -z "$ARGO_MODE" ]]; then
+    echo -e "请选择 Cloudflare Argo 隧道模式："
+    echo -e "  1) 固定隧道 (Fixed Tunnel: 需 Token + 绑定域名)"
+    echo -e "  2) 临时隧道 (Quick Tunnel: 免 Token/免域名，自动生成 trycloudflare.com)"
+    echo -e "  3) 不启用 / 跳过 (默认)"
+    read -r -p "请选择 [1-3] (默认 3): " SEL_ARGO || true
+    case "${SEL_ARGO:-3}" in
+      1)
+        read -r -p "请输入 Cloudflare Argo Token: " INPUT_ARGO_TOKEN || true
+        read -r -p "请输入绑定的 Argo 域名: " INPUT_ARGO_DOMAIN || true
+        ARGO_TOKEN="$INPUT_ARGO_TOKEN"
+        ARGO_DOMAIN="$INPUT_ARGO_DOMAIN"
+        if [[ -n "$ARGO_TOKEN" && -n "$ARGO_DOMAIN" ]]; then
+          ARGO_MODE="fixed"
+        else
+          warn "Token 或域名为空，已跳过 Argo 隧道"
+          ARGO_MODE="off"
+          ARGO_TOKEN=""
+          ARGO_DOMAIN=""
+        fi
+        ;;
+      2)
+        ARGO_MODE="quick"
+        ARGO_TOKEN=""
+        ARGO_DOMAIN=""
+        ;;
+      *)
+        ARGO_MODE="off"
+        ARGO_TOKEN=""
+        ARGO_DOMAIN=""
+        ;;
+    esac
   fi
-fi
+
+  if [[ "$ARGO_MODE" == "fixed" || "$ARGO_MODE" == "quick" ]]; then
+    echo -e "请选择 cloudflared 传输协议："
+    echo -e "  1) http2 (默认推荐，抗 UDP 阻断最稳)"
+    echo -e "  2) quic  (UDP 传输，延迟更低)"
+    echo -e "  3) auto  (自动协商)"
+    read -r -p "请选择 [1-3] (默认 1): " SEL_AP || true
+    case "${SEL_AP:-1}" in
+      2) ARGO_PROTOCOL="quic" ;;
+      3) ARGO_PROTOCOL="auto" ;;
+      *) ARGO_PROTOCOL="http2" ;;
+    esac
+  fi
 fi
 
 if [[ -n "${ARGO_TOKEN:-}" ]]; then
@@ -1839,15 +2118,16 @@ if [[ -n "${ARGO_TOKEN:-}" ]]; then
   fi
 fi
 
-if [[ -n "${ARGO_TOKEN:-}" && -n "${ARGO_DOMAIN:-}" ]]; then
+if [[ "$ARGO_MODE" == "fixed" && -n "${ARGO_TOKEN:-}" && -n "${ARGO_DOMAIN:-}" ]] || [[ "$ARGO_MODE" == "quick" ]]; then
   ARGO_TRANSPORT="ws"
   ARGO_PATH="${_EXT_ARGO_PATH:-${SB_ARGO_PATH:-}}"
   if [[ -z "$ARGO_PATH" ]]; then
     ARGO_PATH="/ws-$(openssl rand -hex 4 2>/dev/null || echo "argo")"
   fi
   [[ "$ARGO_PATH" != /* ]] && ARGO_PATH="/${ARGO_PATH}"
-  ok "Argo 隧道已配置: 域名 ${ARGO_DOMAIN} | 传输协议 [${GREEN}VLESS+WS${PLAIN}] | 路径 [${GREEN}${ARGO_PATH}${PLAIN}]"
+  ok "Argo 隧道已配置: 模式 [${GREEN}${ARGO_MODE}${PLAIN}] | 协议 [${GREEN}${ARGO_PROTOCOL}${PLAIN}] | 传输 [${GREEN}VLESS+WS${PLAIN}] | 路径 [${GREEN}${ARGO_PATH}${PLAIN}]"
 else
+  ARGO_MODE="off"
   ARGO_TRANSPORT=""
   ARGO_PATH="${SB_ARGO_PATH:-}"
   info "已跳过 Argo 隧道配置"
@@ -1863,6 +2143,19 @@ else
   ok "Sing-box 核心已存在 ($($INSTALL_PATH version 2>/dev/null | head -n1 || echo '已就绪'))"
 fi
 
+if [[ "$ENABLE_SNELL" -eq 1 ]]; then
+  CUR_SB_VER="$(get_sb_version)"
+  if [[ -z "$CUR_SB_VER" ]] || ! ver_ge "$CUR_SB_VER" "1.14.0"; then
+    warn "Snell v6 需要 Sing-box >= 1.14.0 (当前: ${CUR_SB_VER:-未知})，正在自动升级核心..."
+    update_core || true
+    CUR_SB_VER="$(get_sb_version)"
+    if [[ -z "$CUR_SB_VER" ]] || ! ver_ge "$CUR_SB_VER" "1.14.0"; then
+      warn "Sing-box 核心版本仍低于 1.14.0 (${CUR_SB_VER:-未知})，已自动跳过 Snell v6 以确保服务正常启动！"
+      ENABLE_SNELL=0
+    fi
+  fi
+fi
+
 # ==============================================================================
 # [8/10] 凭证复用与生成主配置文件 config.json
 # ==============================================================================
@@ -1870,7 +2163,7 @@ echo -e "${YELLOW}[8/10] 生成 Sing-box 核心极速配置文件 (config.json).
 
 # 凭据复用或生成
 UUID=""; TUIC_UUID=""
-HY2_PASS=""; TUIC_PASS=""
+HY2_PASS=""; TUIC_PASS=""; ANYTLS_PASS=""; SNELL_PSK=""
 R_PRI=""; R_PUB=""; SHORT_ID=""
 
 if [[ -f "$STATE_FILE" ]]; then
@@ -1880,15 +2173,22 @@ if [[ -f "$STATE_FILE" ]]; then
   TUIC_UUID="${SB_TUIC_UUID:-}"
   HY2_PASS="${SB_HY2_PASS:-}"
   TUIC_PASS="${SB_TUIC_PASS:-}"
+  ANYTLS_PASS="${SB_ANYTLS_PASS:-}"
+  [[ -z "$SNELL_PSK" ]] && SNELL_PSK="${SB_SNELL_PSK:-}"
   R_PRI="${SB_REALITY_PRI:-}"
   R_PUB="${SB_REALITY_PUB:-}"
   SHORT_ID="${SB_SHORT_ID:-}"
 fi
 
+[[ -n "${_EXT_SNELL_PSK:-}" ]] && SNELL_PSK="$_EXT_SNELL_PSK"
 [[ -z "$UUID" ]] && UUID="$(cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16)"
 [[ -z "$TUIC_UUID" ]] && TUIC_UUID="$(cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16)"
 [[ -z "$HY2_PASS" ]] && HY2_PASS="$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 20)"
 [[ -z "$TUIC_PASS" ]] && TUIC_PASS="$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 20)"
+[[ -z "$ANYTLS_PASS" ]] && ANYTLS_PASS="$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 20)"
+if [[ -z "$SNELL_PSK" || "${#SNELL_PSK}" -lt 12 ]]; then
+  SNELL_PSK="$(openssl rand -base64 24 | tr -dc 'a-zA-Z0-9' | head -c 24)"
+fi
 [[ -z "$SHORT_ID" ]] && SHORT_ID="$(openssl rand -hex 8)"
 
 if [[ -z "$R_PRI" || -z "$R_PUB" ]]; then
@@ -2063,6 +2363,84 @@ if [[ "$ENABLE_TUIC" -eq 1 ]]; then
   ')"
 fi
 
+if [[ "$ENABLE_ANYTLS" -eq 1 ]]; then
+  INBOUNDS_JSON="$(echo "$INBOUNDS_JSON" | jq --arg pwd "$ANYTLS_PASS" \
+    --arg cert "$CERT_PATH" --arg key "$KEY_PATH" \
+    --argjson p4 "$P_ANYTLS_V4" --argjson p6 "$P_ANYTLS_V6" --arg mode "$OUT_MODE" '
+    if $mode == "both" then
+      . + [
+        {
+          "type": "anytls",
+          "tag": "anytls-in-v4",
+          "listen": "0.0.0.0",
+          "listen_port": $p4,
+          "users": [{ "name": "sb", "password": $pwd }],
+          "tls": { "enabled": true, "certificate_path": $cert, "key_path": $key }
+        },
+        {
+          "type": "anytls",
+          "tag": "anytls-in-v6",
+          "listen": "::",
+          "listen_port": $p6,
+          "users": [{ "name": "sb", "password": $pwd }],
+          "tls": { "enabled": true, "certificate_path": $cert, "key_path": $key }
+        }
+      ]
+    else
+      . + [
+        {
+          "type": "anytls",
+          "tag": "anytls-in",
+          "listen": (if $mode == "ipv6" then "::" else "0.0.0.0" end),
+          "listen_port": $p4,
+          "users": [{ "name": "sb", "password": $pwd }],
+          "tls": { "enabled": true, "certificate_path": $cert, "key_path": $key }
+        }
+      ]
+    end
+  ')"
+fi
+
+if [[ "$ENABLE_SNELL" -eq 1 ]]; then
+  INBOUNDS_JSON="$(echo "$INBOUNDS_JSON" | jq --arg psk "$SNELL_PSK" --arg smode "$SNELL_MODE" \
+    --argjson p4 "$P_SNELL_V4" --argjson p6 "$P_SNELL_V6" --arg mode "$OUT_MODE" '
+    if $mode == "both" then
+      . + [
+        {
+          "type": "snell",
+          "tag": "snell-in-v4",
+          "listen": "0.0.0.0",
+          "listen_port": $p4,
+          "version": 6,
+          "psk": $psk,
+          "mode": $smode
+        },
+        {
+          "type": "snell",
+          "tag": "snell-in-v6",
+          "listen": "::",
+          "listen_port": $p6,
+          "version": 6,
+          "psk": $psk,
+          "mode": $smode
+        }
+      ]
+    else
+      . + [
+        {
+          "type": "snell",
+          "tag": "snell-in",
+          "listen": (if $mode == "ipv6" then "::" else "0.0.0.0" end),
+          "listen_port": $p4,
+          "version": 6,
+          "psk": $psk,
+          "mode": $smode
+        }
+      ]
+    end
+  ')"
+fi
+
 # 构建 outbounds 数组 (纯原生直连与用户态 WireGuard，无需创建系统网卡)
 OUTBOUNDS_JSON="[]"
 
@@ -2108,27 +2486,50 @@ if [[ "$ENABLE_WARP" -eq 1 && "$WARP_CFG_READY" -eq 1 ]]; then
 fi
 
 # 构建 route rules
+FINAL_OUT="direct"
+[[ "$OUT_MODE" == "both" ]] && FINAL_OUT="direct-v4"
+
 RULES_JSON="[]"
 if [[ "$ENABLE_WARP" -eq 1 && "$WARP_CFG_READY" -eq 1 ]]; then
-  WARP_DOMAINS_JSON="$(printf '%s\n' "${WARP_AI_DOMAINS[@]}" | jq -R . | jq -s .)"
-  RULES_JSON="$(echo "$RULES_JSON" | jq --argjson doms "$WARP_DOMAINS_JSON" '
-    . + [{ "domain_suffix": $doms, "outbound": "warp-out" }]
-  ')"
+  if [[ "$WARP_MODE" == "ai" ]]; then
+    WARP_DOMAINS_JSON="$(printf '%s\n' "${WARP_AI_DOMAINS[@]}" | jq -R . | jq -s .)"
+    RULES_JSON="$(echo "$RULES_JSON" | jq --argjson doms "$WARP_DOMAINS_JSON" '
+      . + [{ "domain_suffix": $doms, "outbound": "warp-out" }]
+    ')"
+  elif [[ "$WARP_MODE" == "v4" ]]; then
+    RULES_JSON="$(echo "$RULES_JSON" | jq --arg final "$FINAL_OUT" '
+      . + [
+        { "ip_is_private": true, "outbound": $final },
+        { "ip_version": 4, "outbound": "warp-out" }
+      ]
+    ')"
+  elif [[ "$WARP_MODE" == "v6" ]]; then
+    RULES_JSON="$(echo "$RULES_JSON" | jq --arg final "$FINAL_OUT" '
+      . + [
+        { "ip_is_private": true, "outbound": $final },
+        { "ip_version": 6, "outbound": "warp-out" }
+      ]
+    ')"
+  elif [[ "$WARP_MODE" == "all" ]]; then
+    RULES_JSON="$(echo "$RULES_JSON" | jq --arg final "$FINAL_OUT" '
+      . + [
+        { "ip_is_private": true, "outbound": $final },
+        { "network": ["tcp", "udp"], "outbound": "warp-out" }
+      ]
+    ')"
+  fi
 fi
 
-if [[ "$OUT_MODE" == "both" ]]; then
+if [[ "$OUT_MODE" == "both" && ! ( "$ENABLE_WARP" -eq 1 && "$WARP_CFG_READY" -eq 1 && "$WARP_MODE" == "all" ) ]]; then
   RULES_JSON="$(echo "$RULES_JSON" | jq '
     . + [
-      { "inbound": ["vless-reality-v4", "hy2-in-v4", "tuic-in-v4"], "outbound": "direct-v4" },
-      { "inbound": ["vless-reality-v6", "hy2-in-v6", "tuic-in-v6"], "outbound": "direct-v6" }
+      { "inbound": ["vless-reality-v4", "hy2-in-v4", "tuic-in-v4", "anytls-in-v4", "snell-in-v4"], "outbound": "direct-v4" },
+      { "inbound": ["vless-reality-v6", "hy2-in-v6", "tuic-in-v6", "anytls-in-v6", "snell-in-v6"], "outbound": "direct-v6" }
     ]
   ')"
 fi
 
-FINAL_OUT="direct"
-[[ "$OUT_MODE" == "both" ]] && FINAL_OUT="direct-v4"
-
-if [[ -n "${ARGO_TOKEN:-}" && -n "${ARGO_DOMAIN:-}" ]]; then
+if [[ "$ARGO_MODE" == "fixed" || "$ARGO_MODE" == "quick" ]]; then
   INBOUNDS_JSON="$(echo "$INBOUNDS_JSON" | jq --arg uuid "$UUID" --argjson port "$ARGO_PORT" --arg path "${ARGO_PATH:-/argo}" '
     . + [
       {
@@ -2151,12 +2552,25 @@ if [[ -n "${ARGO_TOKEN:-}" && -n "${ARGO_DOMAIN:-}" ]]; then
   ')"
 fi
 
+DNS_SERVER_IP="1.1.1.1"
+DNS_STRATEGY="prefer_ipv4"
+if [[ "$HAS_V4" -ne 1 ]]; then
+  DNS_SERVER_IP="2606:4700:4700::1111"
+  if [[ "$ENABLE_WARP" -eq 1 && "$WARP_CFG_READY" -eq 1 && ( "$WARP_MODE" == "v4" || "$WARP_MODE" == "all" ) ]]; then
+    DNS_STRATEGY="prefer_ipv4"
+  else
+    DNS_STRATEGY="prefer_ipv6"
+  fi
+fi
+
 # 整合最终配置 (带极速本地内存 DNS 缓存)
 FINAL_CONFIG="$(jq -n \
   --argjson inbounds "$INBOUNDS_JSON" \
   --argjson outbounds "$OUTBOUNDS_JSON" \
   --argjson rules "$RULES_JSON" \
   --arg final_out "$FINAL_OUT" \
+  --arg dns_ip "$DNS_SERVER_IP" \
+  --arg dns_strat "$DNS_STRATEGY" \
   '{
     "log": {
       "level": "warn",
@@ -2167,19 +2581,19 @@ FINAL_CONFIG="$(jq -n \
         {
           "tag": "dns-remote",
           "type": "tls",
-          "server": "1.1.1.1"
+          "server": $dns_ip
         },
         {
           "tag": "dns-direct",
           "type": "udp",
-          "server": "1.1.1.1"
+          "server": $dns_ip
         },
         {
           "tag": "dns-local",
           "type": "local"
         }
       ],
-      "strategy": "prefer_ipv4"
+      "strategy": $dns_strat
     },
     "inbounds": $inbounds,
     "outbounds": $outbounds,
@@ -2264,6 +2678,11 @@ UDP_ALLOW=""
 [[ "$ENABLE_REALITY" -eq 1 ]] && TCP_ALLOW="${TCP_ALLOW} ${P_REALITY_V4} $([[ "$OUT_MODE" == "both" ]] && echo "$P_REALITY_V6")"
 [[ "$ENABLE_HY2" -eq 1 ]] && UDP_ALLOW="${UDP_ALLOW} ${P_HY2_V4} $([[ "$OUT_MODE" == "both" ]] && echo "$P_HY2_V6")"
 [[ "$ENABLE_TUIC" -eq 1 ]] && UDP_ALLOW="${UDP_ALLOW} ${P_TUIC_V4} $([[ "$OUT_MODE" == "both" ]] && echo "$P_TUIC_V6")"
+[[ "$ENABLE_ANYTLS" -eq 1 ]] && TCP_ALLOW="${TCP_ALLOW} ${P_ANYTLS_V4} $([[ "$OUT_MODE" == "both" ]] && echo "$P_ANYTLS_V6")"
+if [[ "$ENABLE_SNELL" -eq 1 ]]; then
+  TCP_ALLOW="${TCP_ALLOW} ${P_SNELL_V4} $([[ "$OUT_MODE" == "both" ]] && echo "$P_SNELL_V6")"
+  UDP_ALLOW="${UDP_ALLOW} ${P_SNELL_V4} $([[ "$OUT_MODE" == "both" ]] && echo "$P_SNELL_V6")"
+fi
 
 fw_allow_ports "$TCP_ALLOW" "$UDP_ALLOW" "$HOP_RANGE"
 apply_tuning
@@ -2286,9 +2705,55 @@ fi
 pkill -9 -f xray-argo >/dev/null 2>&1 || true
 rm -f /usr/local/bin/xray-argo "$CONF_DIR/xray-argo.json" "$CONF_DIR/awg.conf" >/dev/null 2>&1 || true
 
+# 生成 Quick Tunnel 域名变更自动重推守护脚本
+cat > "$ARGO_WATCH_SCRIPT" <<'EOWATCH'
+#!/usr/bin/env bash
+set -u
+STATE="/etc/sing-box/.sb_state"
+MGR_CONF="/etc/sing-box/.sb_mgr_conf"
+LOG_FILE="/var/log/cloudflared-argo.log"
+
+run_watch() {
+  [[ -f /tmp/.sb_installing ]] && return 0
+  [[ -f "$STATE" ]] || return 0
+  # shellcheck disable=SC1090
+  source "$STATE" >/dev/null 2>&1 || true
+  [[ "${SB_ARGO_MODE:-}" == "quick" ]] || return 0
+
+  local i=0 new_dom=""
+  while (( i < 30 )); do
+    if [[ -f "$LOG_FILE" ]]; then
+      new_dom="$(grep -oE 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' "$LOG_FILE" 2>/dev/null | tail -n1 | sed 's|https://||' || true)"
+      [[ -n "$new_dom" ]] && break
+    fi
+    sleep 1
+    i=$((i + 1))
+  done
+
+  [[ -z "$new_dom" ]] && return 0
+  if [[ "$new_dom" != "${SB_ARGO_DOMAIN:-}" ]]; then
+    if grep -q '^SB_ARGO_DOMAIN=' "$STATE" 2>/dev/null; then
+      sed -i "s|^SB_ARGO_DOMAIN=.*|SB_ARGO_DOMAIN=\"${new_dom}\"|" "$STATE"
+    else
+      echo "SB_ARGO_DOMAIN=\"${new_dom}\"" >> "$STATE"
+    fi
+    if [[ -f "$MGR_CONF" && -x /usr/local/bin/sb ]]; then
+      AUTO_INSTALL=1 /usr/local/bin/sb push >/dev/null 2>&1 || true
+    fi
+  fi
+}
+
+if [[ "${1:-}" == "--bg" ]]; then
+  ( sleep 2; run_watch ) >/dev/null 2>&1 &
+else
+  run_watch
+fi
+EOWATCH
+chmod +x "$ARGO_WATCH_SCRIPT"
+
 # 配置与启动 Cloudflare Argo 隧道 (cloudflared)
-if [[ -n "${ARGO_TOKEN:-}" && -n "${ARGO_DOMAIN:-}" ]]; then
-  info "正在配置 Cloudflare Argo 隧道 (cloudflared)..."
+if [[ "$ARGO_MODE" == "fixed" || "$ARGO_MODE" == "quick" ]]; then
+  info "正在配置 Cloudflare Argo 隧道 (模式: ${ARGO_MODE}, 协议: ${ARGO_PROTOCOL})..."
   local_arch="$(_arch_norm)"
 
   # 校验当前已有二进制是否完整可用，若损坏则强制清理重新下载
@@ -2307,6 +2772,13 @@ if [[ -n "${ARGO_TOKEN:-}" && -n "${ARGO_DOMAIN:-}" ]]; then
     warn "cloudflared 守护程序下载或校验失败，Argo 隧道启动暂时受阻，其他协议服务不受影响！"
   else
     ok "cloudflared 核心校验通过 ($(/usr/local/bin/cloudflared --version 2>/dev/null | head -n1))"
+    touch /tmp/.sb_installing 2>/dev/null || true
+    if [[ "$ARGO_MODE" == "quick" ]]; then
+      CF_EXEC_ARGS="--no-autoupdate tunnel --protocol ${ARGO_PROTOCOL} --url http://127.0.0.1:${ARGO_PORT} --logfile ${ARGO_LOG_FILE}"
+    else
+      CF_EXEC_ARGS="--no-autoupdate tunnel --protocol ${ARGO_PROTOCOL} run --token ${ARGO_TOKEN}"
+    fi
+
     if has_systemd; then
       systemctl stop cloudflared >/dev/null 2>&1 || true
       rm -rf /etc/systemd/system/cloudflared.service.d 2>/dev/null || true
@@ -2319,7 +2791,9 @@ Wants=network-online.target
 [Service]
 Type=simple
 TimeoutStartSec=15
-ExecStart=/usr/local/bin/cloudflared --no-autoupdate tunnel run --token ${ARGO_TOKEN}
+ExecStartPre=/bin/sh -c ': > ${ARGO_LOG_FILE}'
+ExecStart=/usr/local/bin/cloudflared ${CF_EXEC_ARGS}
+ExecStartPost=-${ARGO_WATCH_SCRIPT} --bg
 Restart=on-failure
 RestartSec=5s
 KillMode=mixed
@@ -2343,9 +2817,15 @@ EOF
 #!/sbin/openrc-run
 name="cloudflared"
 command="/usr/local/bin/cloudflared"
-command_args="--no-autoupdate tunnel run --token ${ARGO_TOKEN}"
+command_args="${CF_EXEC_ARGS}"
 command_background=true
 pidfile="/run/cloudflared.pid"
+start_pre() {
+  : > ${ARGO_LOG_FILE}
+}
+start_post() {
+  ${ARGO_WATCH_SCRIPT} --bg >/dev/null 2>&1 || true
+}
 depend() { need net; }
 EOF
       chmod +x /etc/init.d/cloudflared
@@ -2358,6 +2838,28 @@ EOF
         warn "Cloudflare Argo 守护进程 (OpenRC) 启动异常"
       fi
     fi
+
+    if [[ "$ARGO_MODE" == "quick" ]]; then
+      info "正在等待 Quick Tunnel 分配临时域名 (*.trycloudflare.com)..."
+      _qt_i=0
+      while (( _qt_i < 25 )); do
+        if [[ -f "$ARGO_LOG_FILE" ]]; then
+          _qt_dom="$(grep -oE 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' "$ARGO_LOG_FILE" 2>/dev/null | tail -n1 | sed 's|https://||' || true)"
+          if [[ -n "$_qt_dom" ]]; then
+            ARGO_DOMAIN="$_qt_dom"
+            break
+          fi
+        fi
+        sleep 1
+        _qt_i=$((_qt_i + 1))
+      done
+      if [[ -n "${ARGO_DOMAIN:-}" ]]; then
+        ok "Quick Tunnel 临时域名获取成功: ${ARGO_DOMAIN}"
+      else
+        warn "暂未从日志提取到 trycloudflare.com 域名，后台守护脚本将在就绪后自动更新并重推"
+      fi
+    fi
+    rm -f /tmp/.sb_installing 2>/dev/null || true
   fi
 else
   # 未配置或已关闭 Argo 隧道，停止 cloudflared
@@ -2380,6 +2882,9 @@ SB_UUID="${UUID}"
 SB_TUIC_UUID="${TUIC_UUID}"
 SB_HY2_PASS="${HY2_PASS}"
 SB_TUIC_PASS="${TUIC_PASS}"
+SB_ANYTLS_PASS="${ANYTLS_PASS}"
+SB_SNELL_PSK="${SNELL_PSK}"
+SB_SNELL_MODE="${SNELL_MODE}"
 SB_REALITY_PRI="${R_PRI}"
 SB_REALITY_PUB="${R_PUB}"
 SB_SHORT_ID="${SHORT_ID}"
@@ -2390,16 +2895,25 @@ SB_CERT_INSECURE="${CERT_INSECURE}"
 SB_ENABLE_REALITY="${ENABLE_REALITY}"
 SB_ENABLE_HY2="${ENABLE_HY2}"
 SB_ENABLE_TUIC="${ENABLE_TUIC}"
+SB_ENABLE_ANYTLS="${ENABLE_ANYTLS}"
+SB_ENABLE_SNELL="${ENABLE_SNELL}"
 SB_REALITY_P4="${P_REALITY_V4}"
 SB_REALITY_P6="${P_REALITY_V6}"
 SB_HY2_P4="${P_HY2_V4}"
 SB_HY2_P6="${P_HY2_V6}"
 SB_TUIC_P4="${P_TUIC_V4}"
 SB_TUIC_P6="${P_TUIC_V6}"
+SB_ANYTLS_P4="${P_ANYTLS_V4}"
+SB_ANYTLS_P6="${P_ANYTLS_V6}"
+SB_SNELL_P4="${P_SNELL_V4}"
+SB_SNELL_P6="${P_SNELL_V6}"
 SB_HOP_RANGE="${HOP_RANGE}"
 SB_ENABLE_WARP="${ENABLE_WARP}"
+SB_WARP_MODE="${WARP_MODE}"
 SB_ACME_MODE="${ACME_MODE:-}"
 SB_CF_TOKEN="${CF_TOKEN:-}"
+SB_ARGO_MODE="${ARGO_MODE:-off}"
+SB_ARGO_PROTOCOL="${ARGO_PROTOCOL:-http2}"
 SB_ARGO_TOKEN="${ARGO_TOKEN:-}"
 SB_ARGO_DOMAIN="${ARGO_DOMAIN:-}"
 SB_ARGO_PORT="${ARGO_PORT:-10086}"
